@@ -44,7 +44,10 @@ def _resolves(dotted_name):
     for i in range(len(parts), 0, -1):
         try:
             obj = importlib.import_module(".".join(parts[:i]))
-        except ImportError:
+        except ImportError as error:
+            if error.name is not None and error.name.split(".")[0] != "reservoirpy":
+                # an optional dependency (e.g. Jax) is not installed: cannot tell
+                return True
             continue
         try:
             for attr in parts[i:]:
