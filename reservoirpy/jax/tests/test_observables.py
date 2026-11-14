@@ -17,7 +17,7 @@ X = np.random.default_rng(0).uniform(size=(300, 1))
 
 
 def test_spectral_radius_of_a_sparse_jax_matrix():
-    reservoir = Reservoir(200, sr=0.7, seed=0)
+    reservoir = Reservoir(200, sr=0.7, W=rjx.mat_gen.normal(sparsity_type="csr"), seed=0)
     reservoir.run(X)
 
     assert isinstance(reservoir.W, sparse.BCOO)
@@ -25,7 +25,7 @@ def test_spectral_radius_of_a_sparse_jax_matrix():
 
 
 def test_spectral_radius_of_a_dense_jax_matrix():
-    reservoir = Reservoir(50, sr=0.7, W=rjx.mat_gen.normal(sparsity_type="dense"), seed=0)
+    reservoir = Reservoir(50, sr=0.7, seed=0)  # stored dense: see reservoirpy.jax.mat_gen
     reservoir.run(X)
 
     assert_allclose(observables.spectral_radius(reservoir.W), 0.7, rtol=1e-4)

@@ -48,69 +48,151 @@ backend once.
 
 .. _jax_speed:
 
-Speed depends on the connectivity of the reservoir
-==================================================
+Dense or sparse weights, and speed
+==================================
 
-The benchmark of :doc:`jax_backend` uses reservoirs with five connections per neuron (``rc_connectivity=5/units``).
-With the default ``rc_connectivity=0.1``, the picture is different.
+The NumPy backend stores the recurrent matrix ``W`` as a SciPy sparse array. The Jax equivalent, a
+:py:class:`jax.experimental.sparse.BCOO` array, is only faster than a dense array when the matrix is very sparse. The
+Jax initializers therefore choose: a matrix is stored dense when at least 3% of its elements are non-zero, or when it
+has at most 100 000 elements, and sparse otherwise (:mod:`reservoirpy.jax.mat_gen`). The values of the matrix are the
+same either way, and it is always generated sparse, so that setting its spectral radius stays cheap.
 
-A Jax reservoir stores ``W`` as a sparse :py:class:`jax.experimental.sparse.BCOO` array, as the NumPy backend
-stores it as a SciPy sparse array. Jax sparse products are slow when the matrix is not very sparse. For such
-reservoirs, ask for a dense matrix:
+With the default ``rc_connectivity=0.1`` a Jax reservoir is therefore dense. With the five connections per neuron of
+the benchmark in :doc:`jax_backend` (``rc_connectivity=5/units``), it is sparse from 317 units up. To decide yourself:
 
 .. code-block:: python
 
     import reservoirpy.jax as rjx
 
-    reservoir = rjx.nodes.Reservoir(1000, W=rjx.mat_gen.normal(sparsity_type="dense"))
+    reservoir = rjx.nodes.Reservoir(1000, W=rjx.mat_gen.normal(sparsity_type="csr"))    # always sparse
+    reservoir = rjx.nodes.Reservoir(1000, W=rjx.mat_gen.normal(sparsity_type="dense"))  # always dense
 
-The matrix has the same values, and the reservoir gives the same output.
+Prefer the default to ``sparsity_type="dense"`` for large reservoirs: asking the initializer for a dense matrix also
+makes it compute the spectral radius on a dense matrix, which takes minutes at 10 000 units.
 
-Time to run a reservoir on 5000 timesteps, in seconds, after compilation (Apple M5 Max, CPU, Jax 0.12; your numbers
-will differ):
+The thresholds come from the timings below: microseconds per timestep of :py:meth:`~reservoirpy.jax.Node.run`,
+after compilation, on 2000 timesteps. The fastest Jax storage is in bold.
+
+Apple M5 Max, CPU, Jax 0.12:
 
 .. list-table::
     :header-rows: 1
 
     * - Units
-      - ``rc_connectivity``
-      - NumPy
-      - Jax, sparse (default)
-      - Jax, dense
+      - Density
+      - NumPy (sparse)
+      - Jax sparse
+      - Jax dense
     * - 300
-      - 0.1
-      - 0.12
-      - 0.44
-      - 0.13
-    * - 1000
-      - 0.1
-      - 0.61
-      - 3.2
-      - 0.58
-    * - 3000
-      - 0.1
-      - 6.1
-      - 26
-      - 8.9
+      - 0.5%
+      - 13
+      - 52
+      - **32**
     * - 300
-      - 5 / units
-      - 0.07
-      - 0.15
-      - 0.13
+      - 10%
+      - 20
+      - 89
+      - **48**
     * - 1000
-      - 5 / units
-      - 0.13
-      - 0.25
-      - 0.56
+      - 0.5%
+      - 20
+      - **57**
+      - 84
+    * - 1000
+      - 1%
+      - 24
+      - 117
+      - **89**
+    * - 1000
+      - 10%
+      - 112
+      - 652
+      - **81**
     * - 3000
-      - 5 / units
-      - 0.28
-      - 0.62
-      - 8.5
+      - 1%
+      - 113
+      - **555**
+      - 600
+    * - 3000
+      - 2%
+      - 184
+      - 989
+      - **739**
+    * - 3000
+      - 10%
+      - 1024
+      - 4685
+      - **620**
 
-These timings only cover :py:meth:`~reservoirpy.jax.Node.run` on a CPU. The benchmark of :doc:`jax_backend` times
-``fit`` and ``run`` of a whole model together, and a GPU changes the comparison again; neither was measured here. Time
-your own model before choosing.
+NVIDIA L4 GPU (cloud instance), same script:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Units
+      - Density
+      - NumPy (sparse, host CPU)
+      - Jax sparse
+      - Jax dense
+    * - 300
+      - 0.5%
+      - 21
+      - 75
+      - **66**
+    * - 300
+      - 10%
+      - 32
+      - 82
+      - **66**
+    * - 1000
+      - 1%
+      - 40
+      - **79**
+      - 82
+    * - 1000
+      - 2%
+      - 51
+      - 85
+      - **82**
+    * - 1000
+      - 10%
+      - 170
+      - 138
+      - **82**
+    * - 3000
+      - 2%
+      - 284
+      - **180**
+      - 258
+    * - 3000
+      - 5%
+      - 752
+      - 371
+      - **258**
+    * - 3000
+      - 10%
+      - 1402
+      - 422
+      - **261**
+    * - 10 000
+      - 0.2%
+      - not measured
+      - **673**
+      - 8758 (at 0.1%)
+
+What these numbers say, and do not say:
+
+- The crossing point is between 1% and 2% density on this CPU and between 2% and 5% on this GPU. 3% is a compromise:
+  between 1% and 5% the automatic choice can be up to about 1.4 times slower than the other storage.
+- No Jax step was faster than about 30 microseconds on this CPU and 65 on this GPU, whatever the size. At 300 units
+  the NumPy backend ran the reservoir faster than Jax on both machines. At 1000 units it depended on the density, and
+  at 3000 units and 10% density Jax was faster on both.
+- At 10 000 units the dense product on the GPU was 30 times slower than at 3000 units, not 11 times. We did not
+  investigate, and that run stopped with a GPU out-of-memory error after three densities, so this size has few
+  measurements. For very large reservoirs, keep the matrix sparse and below a few percent of density.
+- The script and the raw timings are in ``benchmarks/jax_storage`` in the repository.
+- These are timings of ``run`` for one reservoir on two machines. The benchmark of :doc:`jax_backend` times ``fit`` and
+  ``run`` of a whole model. Time your own model before choosing.
 
 The first call of a Jax node also includes its compilation. Do not time it.
 

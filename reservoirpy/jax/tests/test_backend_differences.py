@@ -78,15 +78,15 @@ def test_64_bit_mode_restores_numpy_precision():
     assert single["difference"] > 100 * double["difference"]
 
 
-def test_weights_are_sparse_unless_asked_otherwise():
-    default = jax_nodes.Reservoir(50, seed=0)
-    dense = jax_nodes.Reservoir(50, W=rjx.mat_gen.normal(sparsity_type="dense"), seed=0)
-    default_states, dense_states = default.run(X), dense.run(X)
+def test_storage_of_weights_follows_their_density():
+    # (details in test_mat_gen_storage.py)
+    default = jax_nodes.Reservoir(1000, seed=0)
+    very_sparse = jax_nodes.Reservoir(1000, rc_connectivity=5 / 1000, seed=0)
+    default.run(X)
+    very_sparse.run(X)
 
-    assert isinstance(default.W, sparse.BCOO)
-    assert isinstance(dense.W, jax.Array)
-    # same matrix, stored differently
-    assert_allclose(dense_states, default_states, atol=1e-6)
+    assert isinstance(default.W, jax.Array)
+    assert isinstance(very_sparse.W, sparse.BCOO)
 
 
 def _numpy_only_nodes():

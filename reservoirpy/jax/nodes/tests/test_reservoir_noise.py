@@ -40,8 +40,8 @@ def test_noise_does_not_change_the_weights():
     plain.run(X)
     noisy.run(X)
 
-    assert_array_equal(noisy.W.todense(), plain.W.todense())
-    assert_array_equal(noisy.Win.todense(), plain.Win.todense())
+    assert_array_equal(np.asarray(noisy.W), np.asarray(plain.W))
+    assert_array_equal(np.asarray(noisy.Win), np.asarray(plain.Win))
 
 
 def test_noise_rc_is_added_to_the_state():
