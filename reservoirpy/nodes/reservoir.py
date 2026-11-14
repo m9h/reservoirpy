@@ -79,7 +79,8 @@ class Reservoir(Node):
         Gain of the noise added to the state of the reservoir at each timestep.
     noise_in : float, default to 0.0
         Gain of the noise added to the input of the reservoir at each timestep,
-        before the input weights are applied.
+        before the input weights are applied. Feedback connections are inputs
+        of the reservoir: they receive this noise too.
     noise_type : str, default to "normal"
         Distribution of the noise: the name of a
         :py:class:`numpy.random.Generator` method. ``"normal"`` draws from a

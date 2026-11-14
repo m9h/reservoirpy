@@ -107,6 +107,25 @@ and overwrite the ``reservoir`` variable.
     # correct v0.4 model with feedback connection
     model = (reservoir >> readout) & (reservoir << readout)
 
+Reservoir noise and equation
+============================
+
+The v0.3 :py:class:`~reservoirpy.nodes.Reservoir` had five noise parameters and two update equations. In v0.4:
+
+- ``noise_rc``, ``noise_in``, ``noise_type`` and ``noise_kwargs`` work as before. They were missing from the first
+  v0.4 releases.
+- ``noise_fb`` no longer exists. A feedback connection is now a regular input of the reservoir, so ``noise_in`` is
+  added to the feedback as well as to the other inputs.
+- ``equation="external"`` no longer exists: the activation function is always applied inside the leaky integration.
+  The chunking notebook in the ``examples`` folder shows how to write a reservoir with the other equation as a custom
+  node.
+- ``Wfb``, ``fb_scaling``, ``fb_connectivity`` and ``fb_activation`` no longer exist: feedback weights are columns of
+  ``Win``.
+
+.. code-block:: python
+
+    reservoir = Reservoir(100, sr=0.9, noise_rc=0.01, noise_in=0.01, seed=0)
+
 ScikitLearnNode
 ===============
 

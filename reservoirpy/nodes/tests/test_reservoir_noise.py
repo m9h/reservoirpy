@@ -148,3 +148,12 @@ def test_noise_regularises_the_readout():
         return np.linalg.norm(model.nodes[1].Wout)
 
     assert weight_norm(0.1) < weight_norm(0.0)
+
+
+def test_noise_in_applies_to_feedback():
+    # A feedback connection is one more input of the reservoir: noise_in is added to it too.
+    reservoir, readout = Reservoir(30, noise_in=0.1, seed=1), Ridge(ridge=1e-3)
+    model = (reservoir >> readout) & (reservoir << readout)
+    model.fit(X[:200], X[1:201, :2], warmup=10)
+
+    assert reservoir.input_dim == 3 + 2

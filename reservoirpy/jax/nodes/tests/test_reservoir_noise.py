@@ -193,3 +193,13 @@ def test_same_statistics_as_numpy_backend():
 
     assert_allclose(jax_states.std(), numpy_states.std(), rtol=0.03)
     assert_allclose(jax_states.mean(), numpy_states.mean(), atol=0.01)
+
+
+def test_timeseries_of_a_model_run_share_their_noise():
+    # Documented limitation: a Model starts every timeseries from the same node states, noise key included.
+    model = silent_reservoir(units=20, noise_rc=0.1, seed=0) >> Ridge(ridge=1e-3)
+    model.fit(X, X)
+    outputs = model.run(np.zeros((2, 50, 3)))
+
+    assert np.abs(np.asarray(outputs[0])).sum() > 0
+    assert_allclose(outputs[0], outputs[1])
