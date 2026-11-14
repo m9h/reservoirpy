@@ -24,8 +24,9 @@ by Gauthier, Bollt and Griffith in 2021 [4]_.
 
 - `Interactive reservoir computing for chunking information streams <https://github.com/reservoirpy/reservoirpy/tree/master/examples/Interactive%20reservoir%20computing%20for%20chunking%20information%20streams>`_:
 
-This notebook is work-in-progress about the work from Asabuki, Hiratani and Fukai about unsupervised chunking of
-timeseries, presented in 2018 [5]_.
+A notebook about the unsupervised chunking of timeseries presented by Asabuki, Hiratani and Fukai in 2018 [5]_:
+two reservoirs learn online to predict each other. It shows how to write custom nodes and how to train readouts
+step by step with a teacher signal produced by the model itself.
 
 Contributions
 =============
