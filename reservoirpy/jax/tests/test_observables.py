@@ -54,3 +54,23 @@ def test_metrics_accept_jax_arrays(metric):
     expected = getattr(observables, metric)(y_true, y_pred)
 
     assert_allclose(getattr(observables, metric)(jnp.asarray(y_true), jnp.asarray(y_pred)), expected, rtol=1e-4)
+
+
+def test_task_free_measures_match_numpy_backend():
+    params = dict(units=50, sr=0.9, input_scaling=1.0, seed=0)
+    jax_reservoir, numpy_reservoir = Reservoir(**params), NumpyReservoir(**params)
+
+    # (single precision: ranks are compared with a tolerance well above rounding errors)
+    for measure in (observables.kernel_rank, observables.generalization_rank):
+        assert measure(jax_reservoir, rtol=1e-3, seed=0) == measure(numpy_reservoir, rtol=1e-3, seed=0)
+
+    jax_states = jax_reservoir.run(X)
+    assert observables.effective_rank(jax_states) == observables.effective_rank(np.asarray(jax_states))
+
+
+def test_echo_state_distance_of_jax_reservoirs():
+    contracting = Reservoir(50, sr=0.5, seed=0)
+    chaotic = Reservoir(50, sr=4.0, input_scaling=0.01, seed=0)
+
+    assert observables.echo_state_distance(contracting, seed=0) < 1e-4
+    assert observables.echo_state_distance(chaotic, seed=0) > 0.1
