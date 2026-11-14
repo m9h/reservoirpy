@@ -113,3 +113,21 @@ def test_notebook_uses_existing_api(path):
                     if not _resolves(name):
                         missing.add(name)
     assert missing == set()
+
+
+TUTORIAL_3 = REPO_DIR / "tutorials" / "3-General_Introduction_to_Reservoir_Computing.ipynb"
+
+
+@pytest.mark.skipif(not TUTORIAL_3.exists(), reason="tutorials are not installed")
+def test_canary_loader_explains_missing_data(tmp_path):
+    """The canary song dataset is a separate download. Without it, the loader
+    must say so, rather than fail later on an empty list."""
+    [source] = [cell for cell in _code_cells(str(TUTORIAL_3)) if "def load_data" in cell]
+    tree = ast.parse(source)
+    # keep the function only: the cell also imports optional audio libraries and loads the data
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "load_data")
+    namespace = {"glob": glob}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(TUTORIAL_3), "exec"), namespace)
+
+    with pytest.raises(FileNotFoundError, match="zenodo"):
+        namespace["load_data"](str(tmp_path))
