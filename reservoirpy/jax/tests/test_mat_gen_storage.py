@@ -67,9 +67,34 @@ def test_spectral_radius_is_set_on_the_chosen_storage():
     assert_allclose(spectral_radius(matrix), 0.7, rtol=1e-4)
 
 
-def test_threshold_is_documented_and_used():
-    density = jax_mat_gen.DENSE_ABOVE_DENSITY
-    assert 0.0 < density < 0.1
+def test_thresholds_depend_on_the_device():
+    # measured crossing points: 1 to 2% of density on a CPU, about 5% on a GPU
+    assert jax_mat_gen.DENSE_ABOVE_DENSITY["cpu"] == 0.02
+    assert jax_mat_gen.DENSE_ABOVE_DENSITY["gpu"] == 0.05
+
+    shape, elements = (3000, 3000), 9_000_000
+    # 3% of density: dense on a CPU, sparse on a GPU
+    assert jax_mat_gen.dense_is_faster(shape, nnz=0.03 * elements, backend="cpu")
+    assert not jax_mat_gen.dense_is_faster(shape, nnz=0.03 * elements, backend="gpu")
+    # 1%: sparse on both; 10%: dense on both
+    for backend in ("cpu", "gpu"):
+        assert not jax_mat_gen.dense_is_faster(shape, nnz=0.01 * elements, backend=backend)
+        assert jax_mat_gen.dense_is_faster(shape, nnz=0.1 * elements, backend=backend)
+
+
+def test_small_matrices_are_dense_on_every_device():
+    for backend in ("cpu", "gpu"):
+        assert jax_mat_gen.dense_is_faster((300, 300), nnz=90, backend=backend)
+
+
+def test_unknown_accelerators_use_the_gpu_threshold():
+    assert not jax_mat_gen.dense_is_faster((3000, 3000), nnz=0.03 * 9_000_000, backend="tpu")
+
+
+def test_current_device_is_used_by_default():
+    backend = jax.default_backend()
+    density = jax_mat_gen.DENSE_ABOVE_DENSITY.get(backend, jax_mat_gen.DENSE_ABOVE_DENSITY["gpu"])
+
     assert is_dense(jax_mat_gen.normal(1000, 1000, connectivity=2 * density, seed=0))
     assert is_sparse(jax_mat_gen.normal(1000, 1000, connectivity=density / 3, seed=0))
 
