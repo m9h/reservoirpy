@@ -10,6 +10,7 @@ from ..mat_gen import bernoulli, normal
 from ..node import Node
 from ..type import NodeInput, State, Timestep, Weights, is_array
 from ..utils import rand_generator
+from ..utils.random import noise
 
 
 class Reservoir(Node):
@@ -21,13 +22,18 @@ class Reservoir(Node):
     .. math::
 
         \\mathbf{x}[t+1] = (1 - \\mathrm{lr}) * \\mathbf{x}[t] + \\mathrm{lr}
-         * f(\\mathbf{W}_{in} \\cdot (\\mathbf{u}[t+1])
-          + \\mathbf{W} \\cdot \\mathbf{x}[t])
+         * f(\\mathbf{W}_{in} \\cdot (\\mathbf{u}[t+1] + c_{in} * \\xi)
+          + \\mathbf{W} \\cdot \\mathbf{x}[t] + \\mathbf{b}) + c_{rc} * \\xi
 
     where:
         - :math:`\\mathbf{x}` is the output activation vector of the reservoir;
         - :math:`\\mathbf{u}` is the input timeseries;
-        - :math:`f` is the activation function.
+        - :math:`f` is the activation function;
+        - :math:`\\xi` is a random noise, drawn again at each timestep and for
+          each term;
+        - :math:`c_{in}` and :math:`c_{rc}` are the noise gains ``noise_in``
+          and ``noise_rc``. Both are 0 by default: the reservoir is then
+          deterministic.
 
 
     Parameters
@@ -69,22 +75,45 @@ class Reservoir(Node):
         - If a str, should be a :py:mod:`~reservoirpy.activationsfunc`
         function name.
         - If a callable, should be an element-wise operator on arrays.
+    noise_rc : float, default to 0.0
+        Gain of the noise added to the state of the reservoir at each timestep.
+    noise_in : float, default to 0.0
+        Gain of the noise added to the input of the reservoir at each timestep,
+        before the input weights are applied.
+    noise_type : str, default to "normal"
+        Distribution of the noise: the name of a
+        :py:class:`numpy.random.Generator` method. ``"normal"`` draws from a
+        standard normal distribution, and ``"uniform"`` from a uniform
+        distribution on :math:`[-1, 1]`, unless ``noise_kwargs`` says otherwise.
+    noise_kwargs : dict, optional
+        Parameters of the noise distribution, passed to the
+        :py:class:`numpy.random.Generator` method (e.g. ``{"scale": 2.0}``).
     input_dim : int, optional
         Input dimension. Can be inferred at first call.
     dtype : Numpy dtype, default to np.float64
         Numerical type for node parameters.
     seed : int or :py:class:`numpy.random.Generator`, optional
-        A random state seed, for noise generation.
+        A random state seed, for weights initialization and noise generation.
     name : str, optional
         Node name.
 
     Note
     ----
 
-    If W, Win, bias or Wfb are initialized with an array-like matrix, then all
+    If W, Win or bias are initialized with an array-like matrix, then all
     initializers parameters such as spectral radius (``sr``) or input scaling
     (``input_scaling``) are ignored.
     See :py:mod:`~reservoirpy.mat_gen` for more information.
+
+    Note
+    ----
+
+    Noise is drawn from a generator held by the node, not from its state:
+    :py:meth:`reset` does not rewind it, and two runs on the same data give
+    different results. Build two reservoirs with the same ``seed`` to get the
+    same noise twice. When :py:meth:`run` is given several timeseries and
+    ``workers`` is not 1, each worker process receives a copy of the generator,
+    and timeseries handled by different workers receive the same noise.
 
     Example
     -------
@@ -97,6 +126,11 @@ class Reservoir(Node):
     >>> from reservoirpy.datasets import mackey_glass
     >>> x = mackey_glass(200)
     >>> states = reservoir.run(x)
+
+    A noisy reservoir, with noise on both its state and its input:
+
+    >>> noisy_reservoir = Reservoir(100, lr=0.2, sr=0.8, noise_rc=0.01, noise_in=0.01, seed=0)
+    >>> noisy_states = noisy_reservoir.run(x)
 
     .. plot::
 
@@ -133,7 +167,7 @@ class Reservoir(Node):
     input_scaling: Union[float, Sequence]
     #: Connectivity (or density) of ``Win`` (0.1 by default).
     input_connectivity: float
-    #: Connectivity (or density) of ``Wfb`` (0.1 by default).
+    #: Connectivity (or density) of ``W`` (0.1 by default).
     rc_connectivity: float
     #: Input weights matrix (:math:`\mathbf{W}_{in}`).
     Win: Union["Weights", Callable]
@@ -145,8 +179,18 @@ class Reservoir(Node):
     dtype: type
     #: Activation of the reservoir units (tanh by default) (:math:`f`).
     activation: Callable
+    #: Gain of the noise added to the reservoir state (0.0 by default).
+    noise_rc: float
+    #: Gain of the noise added to the reservoir input (0.0 by default).
+    noise_in: float
+    #: Distribution of the noise ("normal" by default).
+    noise_type: str
+    #: Parameters of the noise distribution.
+    noise_kwargs: dict
     #: A random state generator. Used for generating Win and W.
     rng: np.random.Generator
+    #: A random state generator, used for noise. Spawned from ``rng`` at initialization.
+    noise_rng: np.random.Generator
 
     def __init__(
         self,
@@ -160,6 +204,10 @@ class Reservoir(Node):
         W: Union["Weights", Callable] = normal,
         bias: Union["Weights", Callable, float] = 0.0,
         activation: Union[str, Callable] = tanh,
+        noise_rc: float = 0.0,
+        noise_in: float = 0.0,
+        noise_type: str = "normal",
+        noise_kwargs: Optional[dict] = None,
         input_dim: Optional[int] = None,
         dtype: type = np.float64,
         seed: Optional[Union[int, np.random.Generator]] = None,
@@ -178,6 +226,19 @@ class Reservoir(Node):
         self.dtype = dtype
         self.rng = rand_generator(seed=seed)
         self.name = name
+
+        # noise
+        if noise_rc < 0.0 or noise_in < 0.0:
+            raise ValueError(f"Noise gains must be positive, got noise_rc={noise_rc} and noise_in={noise_in}.")
+        if not callable(getattr(np.random.Generator, str(noise_type), None)):
+            raise ValueError(f"'noise_type' must be the name of a numpy.random.Generator method, got '{noise_type}'.")
+        self.noise_rc = noise_rc
+        self.noise_in = noise_in
+        self.noise_type = noise_type
+        if noise_kwargs is None:
+            # numpy's default uniform distribution is not centered
+            noise_kwargs = dict(low=-1.0, high=1.0) if noise_type == "uniform" else dict()
+        self.noise_kwargs = noise_kwargs
 
         # set units / output_dim
         if units is None and not is_array(W):
@@ -232,6 +293,10 @@ class Reservoir(Node):
                 seed=bias_rng,
             )
 
+        # spawned after the weights generators, so that enabling noise does
+        # not change the weights obtained from a given seed
+        [self.noise_rng] = self.rng.spawn(1)
+
         self.state = {"out": np.zeros((self.units,))}
 
         self.initialized = True
@@ -244,7 +309,16 @@ class Reservoir(Node):
         lr = self.lr
         s = state["out"]
 
+        if self.noise_in > 0.0:
+            x = x + self._noise(self.noise_in, x.shape)
+
         next_state = f(W @ s + Win @ x + bias)
         next_state = (1 - lr) * s + lr * next_state
 
+        if self.noise_rc > 0.0:
+            next_state = next_state + self._noise(self.noise_rc, next_state.shape)
+
         return {"out": next_state}
+
+    def _noise(self, gain: float, shape: tuple) -> np.ndarray:
+        return noise(self.noise_rng, dist=self.noise_type, shape=shape, gain=gain, **self.noise_kwargs)

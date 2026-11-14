@@ -29,6 +29,7 @@ def test_activation_functions_can_be_pickled(name):
     [
         Reservoir(20, seed=1),
         Reservoir(20, activation="sigmoid", seed=1),
+        Reservoir(20, noise_rc=0.1, seed=1),
         IPReservoir(20, seed=1),
         ES2N(20, seed=1),
         LIF(20, seed=1),
@@ -37,10 +38,10 @@ def test_activation_functions_can_be_pickled(name):
     ids=lambda node: type(node).__name__,
 )
 def test_node_pickle_round_trip(node):
-    expected = np.asarray(node.run(X))
-    node.reset()
+    node.run(X)  # initializes the node and moves its state away from zero
     clone = pickle.loads(pickle.dumps(node))
-    assert_allclose(np.asarray(clone.run(X)), expected)
+    # both continue from the same state (and the same noise key, if any)
+    assert_allclose(np.asarray(clone.run(X)), np.asarray(node.run(X)))
 
 
 def test_trained_model_save_and_load(tmp_path):

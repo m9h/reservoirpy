@@ -8,10 +8,11 @@ import jax
 import jax.numpy as jnp
 from numpy.random import Generator
 
+from ...utils.data_validation import check_node_input
 from ..activationsfunc import get_function, tanh
 from ..mat_gen import bernoulli, normal
 from ..node import Node
-from ..type import NodeInput, State, Timestep, Weights, is_array
+from ..type import NodeInput, State, Timestep, Weights, is_array, is_multiseries
 from ..utils import rand_generator
 
 
@@ -24,13 +25,18 @@ class Reservoir(Node):
     .. math::
 
         \\mathbf{x}[t+1] = (1 - \\mathrm{lr}) * \\mathbf{x}[t] + \\mathrm{lr}
-         * f(\\mathbf{W}_{in} \\cdot (\\mathbf{u}[t+1])
-          + \\mathbf{W} \\cdot \\mathbf{x}[t])
+         * f(\\mathbf{W}_{in} \\cdot (\\mathbf{u}[t+1] + c_{in} * \\xi)
+          + \\mathbf{W} \\cdot \\mathbf{x}[t] + \\mathbf{b}) + c_{rc} * \\xi
 
     where:
         - :math:`\\mathbf{x}` is the output activation vector of the reservoir;
         - :math:`\\mathbf{u}` is the input timeseries;
-        - :math:`f` is the activation function.
+        - :math:`f` is the activation function;
+        - :math:`\\xi` is a random noise, drawn again at each timestep and for
+          each term;
+        - :math:`c_{in}` and :math:`c_{rc}` are the noise gains ``noise_in``
+          and ``noise_rc``. Both are 0 by default: the reservoir is then
+          deterministic.
 
 
     Parameters
@@ -72,22 +78,46 @@ class Reservoir(Node):
         - If a str, should be a :py:mod:`~reservoirpy.activationsfunc`
         function name.
         - If a callable, should be an element-wise operator on arrays.
+    noise_rc : float, default to 0.0
+        Gain of the noise added to the state of the reservoir at each timestep.
+    noise_in : float, default to 0.0
+        Gain of the noise added to the input of the reservoir at each timestep,
+        before the input weights are applied.
+    noise_type : {"normal", "uniform"}, default to "normal"
+        Distribution of the noise: standard normal, or uniform on
+        :math:`[-1, 1]`.
     input_dim : int, optional
         Input dimension. Can be inferred at first call.
     dtype : Numpy dtype, default to jnp.float64
         Numerical type for node parameters.
     seed : int or :py:class:`numpy.random.Generator`, optional
-        A random state seed, for noise generation.
+        A random state seed, for weights initialization and noise generation.
     name : str, optional
         Node name.
 
     Note
     ----
 
-    If W, Win, bias or Wfb are initialized with an array-like matrix, then all
+    If W, Win or bias are initialized with an array-like matrix, then all
     initializers parameters such as spectral radius (``sr``) or input scaling
     (``input_scaling``) are ignored.
     See :py:mod:`~reservoirpy.mat_gen` for more information.
+
+    Note
+    ----
+
+    When a noise gain is not 0, the state of the node holds a Jax random key
+    under ``"noise_key"``, next to ``"out"``. The key advances at each
+    timestep and is kept by :py:meth:`reset`, so two runs on the same data
+    give different results, as with the NumPy backend. Build two reservoirs
+    with the same ``seed`` to get the same noise twice. The noise values
+    differ from those of the NumPy backend for the same seed; their
+    distribution is the same.
+
+    When a noisy reservoir is run on several timeseries inside a
+    :py:class:`~reservoirpy.jax.Model`, all timeseries start from the same key
+    and receive the same noise. Run the timeseries one at a time, or run the
+    reservoir on its own, to get independent noise.
 
     Example
     -------
@@ -136,7 +166,7 @@ class Reservoir(Node):
     input_scaling: Union[float, Sequence]
     #: Connectivity (or density) of ``Win`` (0.1 by default).
     input_connectivity: float
-    #: Connectivity (or density) of ``Wfb`` (0.1 by default).
+    #: Connectivity (or density) of ``W`` (0.1 by default).
     rc_connectivity: float
     #: Input weights matrix (:math:`\mathbf{W}_{in}`).
     Win: Union["Weights", Callable]
@@ -148,7 +178,13 @@ class Reservoir(Node):
     dtype: type
     #: Activation of the reservoir units (tanh by default) (:math:`f`).
     activation: Callable
-    #: A random state generator. Used for generating Win and W.
+    #: Gain of the noise added to the reservoir state (0.0 by default).
+    noise_rc: float
+    #: Gain of the noise added to the reservoir input (0.0 by default).
+    noise_in: float
+    #: Distribution of the noise ("normal" by default).
+    noise_type: str
+    #: A random state generator. Used for generating Win, W and the noise key.
     rng: Generator
 
     def __init__(
@@ -163,6 +199,9 @@ class Reservoir(Node):
         W: Union["Weights", Callable] = normal,
         bias: Union["Weights", Callable, float] = 0.0,
         activation: Union[str, Callable] = tanh,
+        noise_rc: float = 0.0,
+        noise_in: float = 0.0,
+        noise_type: str = "normal",
         input_dim: Optional[int] = None,
         dtype: type = jnp.float64,
         seed: Optional[Union[int, Generator]] = None,
@@ -181,6 +220,15 @@ class Reservoir(Node):
         self.dtype = dtype
         self.rng = rand_generator(seed=seed)
         self.name = name
+
+        # noise
+        if noise_rc < 0.0 or noise_in < 0.0:
+            raise ValueError(f"Noise gains must be positive, got noise_rc={noise_rc} and noise_in={noise_in}.")
+        if noise_type not in ("normal", "uniform"):
+            raise ValueError(f"'noise_type' must be 'normal' or 'uniform', got '{noise_type}'.")
+        self.noise_rc = float(noise_rc)
+        self.noise_in = float(noise_in)
+        self.noise_type = noise_type
 
         # set units / output_dim
         if units is None and not is_array(W):
@@ -237,7 +285,22 @@ class Reservoir(Node):
 
         self.state = {"out": jnp.zeros((self.units,))}
 
+        if self._is_noisy:
+            # spawned after the weights generators, so that enabling noise
+            # does not change the weights obtained from a given seed
+            [noise_rng] = self.rng.spawn(1)
+            self.state["noise_key"] = jax.random.PRNGKey(int(noise_rng.integers(2**31 - 1)))
+
         self.initialized = True
+
+    @property
+    def _is_noisy(self) -> bool:
+        return self.noise_rc > 0.0 or self.noise_in > 0.0
+
+    def _noise(self, key, gain: float, shape: tuple):
+        if self.noise_type == "uniform":
+            return gain * jax.random.uniform(key, shape, minval=-1.0, maxval=1.0)
+        return gain * jax.random.normal(key, shape)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step(self, state: State, x: Timestep) -> State:
@@ -248,7 +311,55 @@ class Reservoir(Node):
         lr = self.lr
         s = state["out"]
 
+        # The noise gains are Python floats: a noiseless reservoir is traced
+        # without any random number generation.
+        if not self._is_noisy:
+            next_state = f(W @ s + Win @ x + bias)
+            next_state = (1 - lr) * s + lr * next_state
+            return {"out": next_state}
+
+        key, key_in, key_rc = jax.random.split(state["noise_key"], 3)
+
+        if self.noise_in > 0.0:
+            x = x + self._noise(key_in, self.noise_in, x.shape)
+
         next_state = f(W @ s + Win @ x + bias)
         next_state = (1 - lr) * s + lr * next_state
 
-        return {"out": next_state}
+        if self.noise_rc > 0.0:
+            next_state = next_state + self._noise(key_rc, self.noise_rc, next_state.shape)
+
+        return {"out": next_state, "noise_key": key}
+
+    def run(self, x: Optional[NodeInput] = None, iters: Optional[int] = None, workers=1) -> NodeInput:
+        if not self._is_noisy or x is None or not is_multiseries(x):
+            return super().run(x, iters=iters, workers=workers)
+
+        # Timeseries of a multi-series input all start from the current state.
+        # Each one is given its own noise key; without this, they would all
+        # receive the same noise.
+        check_node_input(x, expected_dim=self.input_dim)
+        if not self.initialized:
+            self.initialize(x)
+
+        keys = jax.random.split(self.state["noise_key"], len(x) + 1)
+        out = self.state["out"]
+        if isinstance(x, Sequence):
+            outputs = [self._run({"out": out, "noise_key": key}, series) for key, series in zip(keys, x)]
+            final_out = outputs[-1][0]["out"]
+            result = [series for _, series in outputs]
+        else:
+            states, result = jax.lax.map(
+                lambda args: self._run({"out": out, "noise_key": args[0]}, args[1]), (keys[:-1], x)
+            )
+            final_out = states["out"][-1]
+
+        self.state = {"out": final_out, "noise_key": keys[-1]}
+        return result
+
+    def reset(self) -> State:
+        previous_state = self.state
+        self.state = {"out": jnp.zeros(self.state["out"].shape)}
+        if "noise_key" in previous_state:
+            self.state["noise_key"] = previous_state["noise_key"]
+        return previous_state
