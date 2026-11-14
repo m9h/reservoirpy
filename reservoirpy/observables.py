@@ -647,8 +647,10 @@ def kernel_rank(
         Singular values below ``rtol`` times the largest one are not counted.
         By default, the tolerance of :py:func:`numpy.linalg.matrix_rank`,
         which only removes rounding errors: simulated states are then often
-        of full rank. A larger value, such as the relative precision of your
-        readout or of your measurements, is more informative.
+        of full rank whatever the reservoir. Values between 1e-6 and 1e-2
+        gave ranks that followed task performance in our tests; for a
+        physical reservoir, the relative precision of the measurements is a
+        natural choice.
     seed : int or :py:class:`numpy.random.Generator`, optional
         Random state seed for the input streams.
 
