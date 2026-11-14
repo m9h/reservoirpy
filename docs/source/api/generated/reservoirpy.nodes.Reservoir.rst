@@ -42,6 +42,11 @@ reservoirpy.nodes.Reservoir
       ~Reservoir.bias
       ~Reservoir.dtype
       ~Reservoir.activation
+      ~Reservoir.noise_rc
+      ~Reservoir.noise_in
+      ~Reservoir.noise_type
+      ~Reservoir.noise_kwargs
       ~Reservoir.rng
+      ~Reservoir.noise_rng
    
    

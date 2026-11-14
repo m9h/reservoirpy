@@ -42,6 +42,9 @@ reservoirpy.jax.nodes.Reservoir
       ~Reservoir.bias
       ~Reservoir.dtype
       ~Reservoir.activation
+      ~Reservoir.noise_rc
+      ~Reservoir.noise_in
+      ~Reservoir.noise_type
       ~Reservoir.rng
    
    
