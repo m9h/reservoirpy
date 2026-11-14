@@ -328,7 +328,7 @@ def mae(y_true: np.ndarray, y_pred: np.ndarray, dimensionwise: bool = False) -> 
 
     .. math::
 
-        \\frac{1}{N} \sum_{i=0}^{N-1} |y_i - \hat{y}_i|
+        \\frac{1}{N} \\sum_{i=0}^{N-1} |y_i - \\hat{y}_i|
 
 
     Parameters
