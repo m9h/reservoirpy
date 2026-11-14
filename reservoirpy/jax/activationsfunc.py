@@ -13,6 +13,11 @@ Jax versions of the :mod:`reservoirpy.activationsfunc` activation functions
 
     get_function
     identity
+    relu
+    sigmoid
+    softmax
+    softplus
+    tanh
 """
 
 # Licence: MIT License
@@ -20,17 +25,46 @@ Jax versions of the :mod:`reservoirpy.activationsfunc` activation functions
 
 from typing import Callable, Union
 
+import jax.nn
 import jax.numpy as jnp
 
-# This is simpler than reservoirpy.activationsfunc
-# since those activation functions are defined in jax.nn
-from jax.nn import relu, sigmoid, softmax, softplus, tanh
+# The functions below are thin wrappers around their :py:mod:`jax.nn`
+# equivalents. They are defined here, rather than imported, so that they can be
+# pickled: ``pickle`` looks functions up by module and name, and the objects
+# exposed by ``jax.nn`` are not the ones found at their declared location.
+# Without this, any node holding an activation function could not be saved.
+
+
+def tanh(x):
+    """Hyperbolic tangent. See :py:func:`jax.numpy.tanh`."""
+    return jnp.tanh(x)
+
+
+def sigmoid(x):
+    """Logistic sigmoid. See :py:func:`jax.nn.sigmoid`."""
+    return jax.nn.sigmoid(x)
+
+
+def relu(x):
+    """Rectified linear unit. See :py:func:`jax.nn.relu`."""
+    return jax.nn.relu(x)
+
+
+def softplus(x):
+    """Softplus. See :py:func:`jax.nn.softplus`."""
+    return jax.nn.softplus(x)
+
+
+def softmax(x, axis=-1):
+    """Softmax. See :py:func:`jax.nn.softmax`."""
+    return jax.nn.softmax(x, axis=axis)
 
 
 # jax.nn.identity was introduced in jax v0.6.0.
 # To be able to use previous jax versions, we reimplement
 # this one.
 def identity(x):
+    """Identity function."""
     return jnp.asarray(x)
 
 

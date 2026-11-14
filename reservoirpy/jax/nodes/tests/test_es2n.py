@@ -31,7 +31,7 @@ def test_es2n_init():
         ES2N()
 
     res = ES2N(100, activation="relu")
-    assert id(res.activation) == id(jax.nn.relu)
+    assert res.activation is relu
 
 
 def test_es2n_init_from_proximity_is_arrays():
