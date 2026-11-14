@@ -61,8 +61,17 @@ def test_rls_train_one_step():
     assert res.shape == (17, 10)
 
 
-def test_rls_train():
+@pytest.fixture
+def double_precision():
+    """64-bit mode for one test, restored afterwards: left enabled, it would
+    change the precision of every test that runs later in the session."""
+    previous = jax.config.jax_enable_x64
     jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", previous)
+
+
+def test_rls_train(double_precision):
     node = RLS(alpha=1e-6)
 
     X, Y = jnp.ones((38, 100)), jnp.ones((38, 10))
