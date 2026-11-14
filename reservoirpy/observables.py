@@ -26,11 +26,23 @@ from typing import Literal, Optional, Union
 
 import numpy as np
 from scipy import linalg
-from scipy.sparse import issparse
+from scipy.sparse import coo_array, issparse
 from scipy.sparse.linalg import eigs
 
 from .type import Weights
 from .utils.random import rand_generator
+
+
+def _as_scipy_or_numpy(W):
+    """Convert the matrices of the Jax backend (sparse ``BCOO`` or dense) to
+    their SciPy or NumPy equivalent. Other matrices are returned as they are.
+    Jax is not imported: a Jax sparse matrix is recognized by its attributes."""
+    if issparse(W) or isinstance(W, np.ndarray):
+        return W
+    if type(W).__name__ == "BCOO" and hasattr(W, "indices") and hasattr(W, "data"):
+        indices = np.asarray(W.indices)
+        return coo_array((np.asarray(W.data), (indices[:, 0], indices[:, 1])), shape=W.shape).tocsr()
+    return np.asarray(W)
 
 
 def _check_arrays(y_true, y_pred):
@@ -87,6 +99,8 @@ def spectral_radius(W: Weights, maxiter: Optional[int] = None) -> float:
     >>> print(spectral_radius(W))
     2.886926160973429
     """
+    W = _as_scipy_or_numpy(W)
+
     if issparse(W):
         if maxiter is None:
             maxiter = W.shape[0] * 20
