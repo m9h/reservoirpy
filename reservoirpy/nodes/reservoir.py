@@ -236,9 +236,6 @@ class Reservoir(Node):
         self.noise_rc = noise_rc
         self.noise_in = noise_in
         self.noise_type = noise_type
-        if noise_kwargs is None:
-            # numpy's default uniform distribution is not centered
-            noise_kwargs = dict(low=-1.0, high=1.0) if noise_type == "uniform" else dict()
         self.noise_kwargs = noise_kwargs
 
         # set units / output_dim
@@ -322,4 +319,8 @@ class Reservoir(Node):
         return {"out": next_state}
 
     def _noise(self, gain: float, shape: tuple) -> np.ndarray:
-        return noise(self.noise_rng, dist=self.noise_type, shape=shape, gain=gain, **self.noise_kwargs)
+        kwargs = self.noise_kwargs
+        if kwargs is None:
+            # numpy's default uniform distribution is not centered
+            kwargs = dict(low=-1.0, high=1.0) if self.noise_type == "uniform" else dict()
+        return noise(self.noise_rng, dist=self.noise_type, shape=shape, gain=gain, **kwargs)

@@ -157,3 +157,9 @@ def test_noise_in_applies_to_feedback():
     model.fit(X[:200], X[1:201, :2], warmup=10)
 
     assert reservoir.input_dim == 3 + 2
+
+
+def test_repr_does_not_show_default_noise_kwargs():
+    assert "noise" not in repr(Reservoir(10))
+    assert "noise_kwargs" not in repr(Reservoir(10, noise_rc=0.1, noise_type="uniform"))
+    assert "noise_kwargs={'low': 2.0" in repr(Reservoir(10, noise_rc=0.1, noise_kwargs=dict(low=2.0, high=3.0)))
