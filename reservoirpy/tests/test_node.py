@@ -204,3 +204,36 @@ def test_node_bad_learning_method():
 
 #     with pytest.raises(ValueError):
 #         offline_node.fit(X, Y, warmup=10)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        dict(lr=np.full(5, 0.5)),
+        dict(input_scaling=np.array([1.0, 2.0])),
+        dict(lr=np.full(5, 0.5), sr=0.9),
+    ],
+    ids=["per-unit lr", "array input_scaling", "array and scalar"],
+)
+def test_repr_with_array_parameter(params):
+    from reservoirpy.nodes import Reservoir
+
+    text = repr(Reservoir(5, **params))
+
+    assert text.startswith("Reservoir(")
+    for name in params:
+        assert f"{name}=" in text
+
+
+def test_repr_omits_array_equal_to_default():
+    from reservoirpy.utils import get_non_defaults
+
+    class WithArrayDefault:
+        def __init__(self, weights=(1.0, 2.0), scale=1.0):
+            self.weights = np.array(weights)
+            self.scale = scale
+
+    assert get_non_defaults(WithArrayDefault()) == {}
+    assert list(get_non_defaults(WithArrayDefault(weights=(1.0, 3.0)))) == ["weights"]
+    # a different shape is a different value, not an error
+    assert list(get_non_defaults(WithArrayDefault(weights=(1.0, 2.0, 3.0)))) == ["weights"]

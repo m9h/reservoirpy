@@ -204,3 +204,27 @@ def test_node_bad_learning_method():
 
 #     with pytest.raises(ValueError):
 #         offline_node.fit(X, Y, warmup=10)
+
+
+def test_repr_with_array_parameter():
+    import jax.numpy as jnp
+
+    from reservoirpy.jax.nodes import Reservoir
+
+    text = repr(Reservoir(5, lr=jnp.full(5, 0.5)))
+
+    assert text.startswith("Reservoir(")
+    assert "lr=" in text
+
+
+def test_model_runs_with_per_unit_leak_rate():
+    """Jax compares the nodes of a model through their repr while tracing."""
+    import numpy as np
+
+    from reservoirpy.jax.nodes import Reservoir, Ridge
+
+    x = np.random.default_rng(0).uniform(size=(40, 2))
+    model = Reservoir(5, lr=np.linspace(0.2, 1.0, 5), seed=0) >> Ridge(ridge=1e-2)
+    model.fit(x[:-1], x[1:])
+
+    assert model.run(x).shape == (40, 2)

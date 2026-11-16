@@ -1,9 +1,24 @@
 # Licence: MIT License
 # Copyright: Xavier Hinaut (2018) <xavier.hinaut@inria.fr>
 
+import numpy as np
+
 from .random import rand_generator
 
 EXCLUDED_PARAMETERS = ["Win", "W", "bias", "Wout"]
+
+
+def _differs(value, default) -> bool:
+    """Whether ``value`` is not the ``default``, also when either one is an array."""
+    if value is default:
+        return False
+    if hasattr(value, "shape") or hasattr(default, "shape"):
+        # ``!=`` on arrays is elementwise, and has no truth value
+        try:
+            return not np.array_equal(np.asarray(value), np.asarray(default))
+        except (TypeError, ValueError):
+            return True
+    return bool(value != default)
 
 
 def get_non_defaults(instance, constructor=None):
@@ -32,5 +47,5 @@ def get_non_defaults(instance, constructor=None):
     return {
         k: getattr(instance, k)
         for k, v in defaults.items()
-        if hasattr(instance, k) and k not in EXCLUDED_PARAMETERS and getattr(instance, k) != v
+        if hasattr(instance, k) and k not in EXCLUDED_PARAMETERS and _differs(getattr(instance, k), v)
     }
