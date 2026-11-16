@@ -115,6 +115,7 @@ def transplant_readout(
     ridge: float = 1e-6,
     targets: Optional[States] = None,
     prior_ridge: float = 1.0,
+    target_states: Optional[States] = None,
 ):
     """Readout for a student reservoir, made from the readout of an expert.
 
@@ -148,6 +149,11 @@ def transplant_readout(
         refinement. Very large: the transplant is kept as it is. Close to
         zero: the result is a readout fitted on the student from scratch.
 
+    target_states : array of shape ([series,] timesteps, student_features) or list of arrays, optional
+        Student states that ``targets`` belong to, when they are not
+        ``student_states``. Typical use: many paired timesteps without
+        targets for the map, and a few timesteps with targets to refine.
+
     Returns
     -------
     Node
@@ -178,16 +184,20 @@ def transplant_readout(
     weights = matrix @ expert_weights
     bias = offset @ expert_weights + expert_bias
 
+    if target_states is not None and targets is None:
+        raise ValueError("'target_states' was given without 'targets'.")
     if targets is not None:
         targets = _stack(targets, "targets")
-        if len(targets) != len(student_states):
+        labelled, name = student_states, "student_states"
+        if target_states is not None:
+            labelled, name = _stack(target_states, "target_states"), "target_states"
+        if len(targets) != len(labelled):
             raise ValueError(
-                f"'targets' must have one row per timestep of 'student_states', "
-                f"got {len(targets)} and {len(student_states)}."
+                f"'targets' must have one row per timestep of '{name}', got {len(targets)} and {len(labelled)}."
             )
         # ridge regression on what the transplant leaves unexplained
-        residual = targets - (student_states @ weights + bias)
-        correction, intercept = _ridge(student_states, residual, prior_ridge)
+        residual = targets - (labelled @ weights + bias)
+        correction, intercept = _ridge(labelled, residual, prior_ridge)
         weights, bias = weights + correction, bias + intercept
 
     student = copy.copy(readout)
