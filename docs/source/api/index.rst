@@ -86,6 +86,7 @@ All modules
    reservoirpy.mat_gen
    reservoirpy.activationsfunc
    reservoirpy.observables
+   reservoirpy.transfer
    reservoirpy.datasets
    reservoirpy.jax
    reservoirpy.hyper
