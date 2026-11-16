@@ -164,3 +164,46 @@ def test_module_docstring_example():
     exec("\n".join(line[4:] for line in block.splitlines()), scope)
 
     assert scope["error"] < 0.1 * float(scope["y"].std())
+
+
+def test_refinement_on_other_timesteps_than_the_paired_ones():
+    """Many paired timesteps without targets, a few timesteps with targets."""
+    expert, expert_states, student_states, y, error = paired_reservoirs()
+    paired, labelled = slice(1500, 2500), slice(1500, 1540)
+
+    refined = transplant_readout(
+        expert,
+        student_states[paired],
+        expert_states[paired],
+        targets=y[labelled],
+        target_states=student_states[labelled],
+        prior_ridge=1e12,
+    )
+    plain = transplant_readout(expert, student_states[paired], expert_states[paired])
+
+    assert_allclose(refined.Wout, plain.Wout, atol=1e-6)  # held in place by the prior
+    # with enough labelled timesteps and no pull, the result is a fit from scratch
+    many = slice(1500, 1700)
+    free = transplant_readout(
+        expert,
+        student_states[paired],
+        expert_states[paired],
+        targets=y[many],
+        target_states=student_states[many],
+        prior_ridge=1e-9,
+    )
+    scratch = Ridge(ridge=1e-9).fit(student_states[many], y[many])
+    # the states are nearly collinear, so compare what the readouts compute, not their weights
+    assert_allclose(free.run(student_states[2600:3000]), scratch.run(student_states[2600:3000]), atol=1e-4)
+    with pytest.raises(ValueError, match="target_states"):
+        transplant_readout(
+            expert, student_states[paired], expert_states[paired], target_states=student_states[labelled]
+        )
+    with pytest.raises(ValueError, match="targets"):
+        transplant_readout(
+            expert,
+            student_states[paired],
+            expert_states[paired],
+            targets=y[paired],
+            target_states=student_states[labelled],
+        )
