@@ -75,10 +75,37 @@ The function can be differentiated with respect to the exposed parameters, the s
 Gradients through a long run are only well behaved when the reservoir forgets its past. Close to or beyond the edge of
 chaos they grow exponentially with the length of the run.
 
+Models
+======
+
+``pure_run`` also takes a fitted :py:class:`~reservoirpy.jax.Model`, feedback connections included. Parameters are
+written ``"node.parameter"`` and the state has one entry per node. A node is called by its name or, if it has none,
+by the name of its class:
+
+.. code-block:: python
+
+    from reservoirpy.jax import ESN
+
+    target = jnp.roll(x, 5, axis=0)                     # recall the input five steps back
+    esn = ESN(units=100, sr=0.9, ridge=1e-4, seed=0, feedback=True)
+    esn.fit(x[:400], target[:400], warmup=50)
+
+    run, params, state = pure_run(esn, "readout.Wout")
+    final_state, predictions = run(params, state, x[400:])  # same values as esn.run(x[400:])
+
+    # how much does the output change when the trained weights are disturbed?
+    def output_change(scale):
+        disturbed = {"readout.Wout": params["readout.Wout"] * scale}
+        return jnp.mean((run(disturbed, state, x[400:])[1] - predictions) ** 2)
+
+    changes = jax.vmap(output_change)(jnp.array([1.0, 1.01, 1.1]))
+
+Because the readout feeds back into the reservoir, the disturbance changes the states too, not only the output.
+
 What it does not do
 ===================
 
-- ``pure_run`` takes a node, not a :py:class:`~reservoirpy.jax.Model`. Chain the functions of the nodes yourself.
+- A model must have a single input node, and two nodes of the same class must be given names.
 - Training (``fit``, ``partial_fit``) is not covered. Fit the node first: its learned parameters (``Wout`` and
   ``bias`` for a readout) can then be exposed like any other.
 - A noisy reservoir keeps its random key in the state (``state["noise_key"]``). Two runs from the same state draw the

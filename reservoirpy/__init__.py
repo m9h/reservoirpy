@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import uuid
 
-from . import activationsfunc, hyper, mat_gen, nodes, observables, type
+from . import activationsfunc, hyper, mat_gen, nodes, observables, transfer, type
 from ._version import __version__
 from .esn import ESN
 from .model import Model
@@ -36,6 +36,7 @@ __all__ = [
     "mat_gen",
     "activationsfunc",
     "observables",
+    "transfer",
     "hyper",
     "datasets",
     "nodes",
