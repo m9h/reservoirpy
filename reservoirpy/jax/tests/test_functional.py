@@ -211,7 +211,7 @@ def test_user_guide_examples():
     assert_allclose(scope["predictions"], scope["esn"].run(scope["x"][400:]), **TOL)
     assert set(esn_state["nodes"]) == {"Reservoir", "readout"}
     changes = np.asarray(scope["changes"])
-    assert changes[0] == 0 and 0 < changes[1] < changes[2]
+    assert changes[0] < 1e-10 < changes[1] < changes[2]  # batched and single runs differ by rounding
 
 
 def test_module_docstring_example():
