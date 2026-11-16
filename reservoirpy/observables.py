@@ -16,6 +16,16 @@ Metrics and observables for Reservoir Computing:
     mae
     memory_capacity
     effective_spectral_radius
+
+Measures of a reservoir that do not depend on a task:
+
+.. autosummary::
+   :toctree: generated/
+
+    kernel_rank
+    generalization_rank
+    effective_rank
+    echo_state_distance
 """
 
 # Licence: MIT License
@@ -563,3 +573,313 @@ def effective_spectral_radius(W: np.ndarray, lr: float = 1.0, maxiter: Optional[
     """
     units = W.shape[0]
     return spectral_radius(W=lr * W + (1 - lr) * np.eye(units), maxiter=maxiter)
+
+
+def _numerical_rank(matrix: np.ndarray, rtol: Optional[float]) -> int:
+    singular_values = np.linalg.svd(np.nan_to_num(np.asarray(matrix, dtype=np.float64)), compute_uv=False)
+    if len(singular_values) == 0 or singular_values[0] == 0.0:
+        return 0
+    if rtol is None:
+        # default of numpy.linalg.matrix_rank
+        rtol = max(matrix.shape) * np.finfo(np.float64).eps
+    return int(np.sum(singular_values > rtol * singular_values[0]))
+
+
+def _input_dim(node, input_dim: Optional[int]) -> int:
+    if getattr(node, "input_dim", None) is not None:
+        if input_dim is not None and input_dim != node.input_dim:
+            raise ValueError(f"input_dim={input_dim} but the node expects inputs of dimension {node.input_dim}.")
+        return node.input_dim
+    return 1 if input_dim is None else input_dim
+
+
+def _final_states(node, streams: np.ndarray) -> np.ndarray:
+    """Final state of a copy of `node` for each stream of `streams`, of shape
+    (n_streams, timesteps, input_dim). Every stream starts from a null state."""
+    clone = deepcopy(node)
+    if clone.initialized:
+        clone.reset()
+    return np.asarray(clone.run(streams))[:, -1, :]
+
+
+def kernel_rank(
+    node: "Node",
+    n_streams: Optional[int] = None,
+    timesteps: int = 100,
+    input_dim: Optional[int] = None,
+    series: Optional[np.ndarray] = None,
+    rtol: Optional[float] = None,
+    seed: Optional[Union[int, np.random.Generator]] = None,
+) -> int:
+    """Kernel rank of a reservoir: how many different input streams it maps
+    to linearly independent states.
+
+    The reservoir is driven by ``n_streams`` different input streams, each
+    from a null state. Its state at the last timestep of each stream is one
+    row of a matrix of shape ``(n_streams, units)``. The kernel rank is the
+    rank of this matrix [1]_.
+
+    If the rank is :math:`r`, a linear readout can assign any target values
+    to :math:`r` of these streams. A high rank means the reservoir separates
+    its inputs well. It does not mean the separation is useful: a chaotic
+    reservoir also separates streams that differ only by noise. Compare
+    with :py:func:`generalization_rank`; in [1]_, the difference of the two
+    is used to predict computational performance.
+
+    By default, input streams are i.i.d. uniform in [-0.8, 0.8], as in
+    :py:func:`memory_capacity`.
+
+    Parameters
+    ----------
+    node : :class:`reservoirpy.Node`
+        A reservoir. It is copied: its state and parameters are not modified.
+    n_streams : int, optional
+        Number of input streams. By default, the number of units of the node.
+        The rank cannot exceed it.
+    timesteps : int, default to 100
+        Length of each stream.
+    input_dim : int, optional
+        Dimension of the input streams, for a node that was never run and
+        does not know it yet. Defaults to 1.
+    series : array of shape (n_streams, timesteps, input_dim), optional
+        If specified, is used as the input streams.
+    rtol : float, optional
+        Singular values below ``rtol`` times the largest one are not counted.
+        By default, the tolerance of :py:func:`numpy.linalg.matrix_rank`,
+        which only removes rounding errors: simulated states are then often
+        of full rank whatever the reservoir. Values between 1e-6 and 1e-2
+        gave ranks that followed task performance in our tests; for a
+        physical reservoir, the relative precision of the measurements is a
+        natural choice.
+    seed : int or :py:class:`numpy.random.Generator`, optional
+        Random state seed for the input streams.
+
+    Returns
+    -------
+    int, between 0 and ``min(n_streams, units)``.
+
+    Examples
+    --------
+    >>> from reservoirpy.nodes import Reservoir
+    >>> from reservoirpy.observables import kernel_rank, generalization_rank
+    >>> reservoir = Reservoir(100, sr=0.9, seed=0)
+    >>> kr = kernel_rank(reservoir, rtol=1e-3, seed=0)
+    >>> gr = generalization_rank(reservoir, rtol=1e-3, seed=0)
+
+    References
+    ----------
+    .. [1] Legenstein, R., & Maass, W. (2007). Edge of chaos and prediction
+        of computational performance for neural circuit models. Neural
+        Networks, 20(3), 323-334.
+    """
+    if series is None:
+        rng = rand_generator(seed)
+        dim = _input_dim(node, input_dim)
+        if n_streams is None:
+            n_streams = node.output_dim
+        series = rng.uniform(low=-0.8, high=0.8, size=(n_streams, timesteps, dim))
+    series = np.asarray(series)
+    if series.ndim != 3 or series.shape[1] == 0:
+        raise ValueError(f"series must be of shape (n_streams, timesteps, input_dim), got {series.shape}.")
+
+    return _numerical_rank(_final_states(node, series), rtol)
+
+
+def generalization_rank(
+    node: "Node",
+    n_streams: Optional[int] = None,
+    timesteps: int = 100,
+    noise: float = 0.05,
+    input_dim: Optional[int] = None,
+    series: Optional[np.ndarray] = None,
+    rtol: Optional[float] = None,
+    seed: Optional[Union[int, np.random.Generator]] = None,
+) -> int:
+    """Generalization rank of a reservoir: how many linearly independent
+    states it produces from noisy versions of one input stream.
+
+    Computed like :py:func:`kernel_rank`, except that the ``n_streams`` input
+    streams are the same stream with independent noise added. In [1]_ this
+    rank estimates the VC-dimension of the linear readouts of the reservoir
+    on such inputs. **Lower is better**: a reservoir that turns small input
+    differences into independent states gives a readout many ways to fit
+    noise.
+
+    Parameters
+    ----------
+    node : :class:`reservoirpy.Node`
+        A reservoir. It is copied: its state and parameters are not modified.
+    n_streams : int, optional
+        Number of noisy versions. By default, the number of units of the node.
+    timesteps : int, default to 100
+        Length of the stream.
+    noise : float, default to 0.05
+        Standard deviation of the gaussian noise added to the stream. What
+        counts as noise depends on the task: choose the size of the input
+        differences that a readout should ignore.
+    input_dim : int, optional
+        Dimension of the input stream, for a node that was never run and does
+        not know it yet. Defaults to 1.
+    series : array of shape (timesteps, input_dim), optional
+        If specified, is used as the stream to which noise is added. By
+        default, i.i.d. uniform in [-0.8, 0.8].
+    rtol : float, optional
+        Singular values below ``rtol`` times the largest one are not counted.
+        See :py:func:`kernel_rank`. Use the same value for both measures.
+    seed : int or :py:class:`numpy.random.Generator`, optional
+        Random state seed for the stream and the noise.
+
+    Returns
+    -------
+    int, between 0 and ``min(n_streams, units)``.
+
+    References
+    ----------
+    .. [1] Legenstein, R., & Maass, W. (2007). Edge of chaos and prediction
+        of computational performance for neural circuit models. Neural
+        Networks, 20(3), 323-334.
+    """
+    if noise < 0.0:
+        raise ValueError(f"noise must be positive, got {noise}.")
+    rng = rand_generator(seed)
+    if series is None:
+        dim = _input_dim(node, input_dim)
+        series = rng.uniform(low=-0.8, high=0.8, size=(timesteps, dim))
+    series = np.asarray(series)
+    if series.ndim != 2 or series.shape[0] == 0:
+        raise ValueError(f"series must be of shape (timesteps, input_dim), got {series.shape}.")
+    if n_streams is None:
+        n_streams = node.output_dim
+
+    streams = series[None, :, :] + noise * rng.normal(size=(n_streams,) + series.shape)
+
+    return _numerical_rank(_final_states(node, streams), rtol)
+
+
+def effective_rank(states: np.ndarray, threshold: float = 0.99) -> int:
+    """Number of directions that hold most of the variation of a matrix of
+    states: the smallest number of singular values whose sum reaches
+    ``threshold`` times the sum of all singular values.
+
+    Unlike :py:func:`kernel_rank`, this is computed from states you already
+    have, for instance the activity recorded during a task or from a physical
+    reservoir, and needs no access to the reservoir itself.
+
+    Parameters
+    ----------
+    states : array of shape (timesteps, units)
+        States of a reservoir. They are not centered.
+    threshold : float, default to 0.99
+        Fraction of the sum of singular values to reach, in ]0, 1].
+
+    Returns
+    -------
+    int, between 0 and ``min(timesteps, units)``. 0 if all states are null.
+
+    Examples
+    --------
+    >>> from reservoirpy.nodes import Reservoir
+    >>> from reservoirpy.datasets import mackey_glass
+    >>> from reservoirpy.observables import effective_rank
+    >>> states = Reservoir(100, sr=0.9, seed=0).run(mackey_glass(500))
+    >>> rank = effective_rank(states)
+    """
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError(f"threshold must be in ]0, 1], got {threshold}.")
+    singular_values = np.linalg.svd(np.nan_to_num(np.asarray(states, dtype=np.float64)), compute_uv=False)
+    total = singular_values.sum()
+    if total == 0.0:
+        return 0
+    cumulated = np.cumsum(singular_values) / total
+    # (rounding: the last cumulated value may be slightly below 1)
+    return int(min(np.searchsorted(cumulated, threshold - 1e-12) + 1, len(singular_values)))
+
+
+def echo_state_distance(
+    node: "Node",
+    series: Optional[np.ndarray] = None,
+    timesteps: int = 1000,
+    n_starts: int = 5,
+    scale: float = 1.0,
+    input_dim: Optional[int] = None,
+    seed: Optional[Union[int, np.random.Generator]] = None,
+) -> float:
+    """Distance left between runs of a reservoir on the same input from
+    different initial states.
+
+    A reservoir with the echo state property [1]_ forgets its initial state:
+    driven long enough by the same input, it reaches the same state wherever
+    it started, and this distance is close to 0. A distance that stays large
+    means that the state depends on something other than the input, and that
+    a readout trained on one run cannot be trusted on the next. For a
+    physical reservoir, the equivalent is the variability between repeated
+    trials of the same stimulus.
+
+    The reservoir is run on ``series`` from a null state, then from
+    ``n_starts`` random states. The result is the euclidean distance between
+    the final state of the first run and that of each other run, averaged.
+
+    Parameters
+    ----------
+    node : :class:`reservoirpy.Node`
+        A reservoir. It is copied: its state and parameters are not modified.
+    series : array of shape (timesteps, input_dim), optional
+        Input timeseries. By default, i.i.d. uniform in [-0.8, 0.8].
+    timesteps : int, default to 1000
+        Length of the default timeseries.
+    n_starts : int, default to 5
+        Number of random initial states.
+    scale : float, default to 1.0
+        Initial states are uniform in [-scale, scale].
+    input_dim : int, optional
+        Dimension of the input, for a node that was never run and does not
+        know it yet. Defaults to 1.
+    seed : int or :py:class:`numpy.random.Generator`, optional
+        Random state seed for the timeseries and the initial states.
+
+    Returns
+    -------
+    float, positive.
+
+    Note
+    ----
+    Only the ``"out"`` entry of the state is randomized. This is a numerical
+    check on one input, not a proof of the echo state property.
+
+    Examples
+    --------
+    >>> from reservoirpy.nodes import Reservoir
+    >>> from reservoirpy.observables import echo_state_distance
+    >>> d = echo_state_distance(Reservoir(100, sr=0.5, seed=0), seed=0)  # close to 0
+    >>> d = echo_state_distance(Reservoir(100, sr=4.0, input_scaling=0.01, seed=0), seed=0)  # not
+
+    References
+    ----------
+    .. [1] Jaeger, H. (2001). The "echo state" approach to analysing and
+        training recurrent neural networks. GMD Report 148.
+    """
+    rng = rand_generator(seed)
+    if series is None:
+        series = rng.uniform(low=-0.8, high=0.8, size=(timesteps, _input_dim(node, input_dim)))
+    series = np.asarray(series)
+    if series.ndim != 2 or series.shape[0] == 0:
+        raise ValueError(
+            f"series must be of shape (timesteps, input_dim) with at least one timestep, got {series.shape}."
+        )
+
+    clone = deepcopy(node)
+    if not clone.initialized:
+        clone.initialize(series)
+    clone.reset()
+    null_state = clone.state
+    reference = np.asarray(clone.run(series))[-1]
+
+    distances = []
+    for _ in range(n_starts):
+        start = rng.uniform(low=-scale, high=scale, size=np.shape(null_state["out"]))
+        # (the sum keeps the array type of the backend)
+        clone.state = {**null_state, "out": null_state["out"] + start}
+        final = np.asarray(clone.run(series))[-1]
+        distances.append(np.linalg.norm(final - reference))
+
+    return float(np.mean(distances))
