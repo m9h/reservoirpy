@@ -27,12 +27,13 @@ See :doc:`/user_guide/jax_backend` for an introduction.
    reservoirpy.jax.node
    reservoirpy.jax.model
    reservoirpy.jax.ops
+   reservoirpy.jax.functional
 """
 
 # Licence: MIT License
 # Copyright: Xavier Hinaut (2018) <xavier.hinaut@inria.fr>
 
-from . import activationsfunc, mat_gen, nodes, type, utils
+from . import activationsfunc, functional, mat_gen, nodes, type, utils
 from .esn import ESN
 from .model import Model
 from .node import Node
@@ -40,6 +41,7 @@ from .node import Node
 __all__ = [
     "mat_gen",
     "activationsfunc",
+    "functional",
     # "observables",  # NOT PLANNED FOR NOW
     # "hyper",  # NOT PLANNED
     # "datasets",  # NOT PLANNED

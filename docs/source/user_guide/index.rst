@@ -27,3 +27,4 @@ see :doc:`quickstart`.
     v0.4_transition_guide
     jax_backend
     jax_backend_differences
+    jax_transformations
