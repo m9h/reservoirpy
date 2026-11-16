@@ -173,8 +173,6 @@ def test_errors():
         pure_run(nodes.Reservoir(20))
     with pytest.raises(AttributeError, match="no parameter 'leak'"):
         pure_run(reservoir(), "leak")
-    with pytest.raises(TypeError, match="Model"):
-        pure_run(reservoir() >> nodes.Ridge())
     run, params, state = pure_run(reservoir(), "lr")
     with pytest.raises(KeyError, match="lr"):
         run({}, state, X)
@@ -193,7 +191,7 @@ def test_user_guide_examples():
     if not guide.exists():
         pytest.skip("documentation sources are not available")
     blocks = re.findall(r"\.\. code-block:: python\n\n((?:    .*\n|\n)+)", guide.read_text())
-    assert len(blocks) == 4
+    assert len(blocks) == 5
     scope = {}
 
     def run_block(block):
@@ -209,6 +207,11 @@ def test_user_guide_examples():
     spreads = np.asarray(scope["spreads"])
     assert spreads[0] < 1e-5 and spreads[1] < 1e-5 and spreads[2] > 0.1
     assert np.isfinite(float(scope["slope"])) and float(scope["slope"]) != 0
+    esn_state = scope["final_state"]
+    assert_allclose(scope["predictions"], scope["esn"].run(scope["x"][400:]), **TOL)
+    assert set(esn_state["nodes"]) == {"Reservoir", "readout"}
+    changes = np.asarray(scope["changes"])
+    assert changes[0] == 0 and 0 < changes[1] < changes[2]
 
 
 def test_module_docstring_example():
@@ -221,3 +224,122 @@ def test_module_docstring_example():
     exec("\n".join(line[4:] for line in block.splitlines()), scope)
 
     assert float(scope["spread"]) < 1e-5
+
+
+# Models
+Y = np.random.default_rng(1).uniform(-1, 1, (50, 1))
+
+
+def fitted(model):
+    model.fit(X, Y, warmup=5)
+    for node in model.nodes:
+        node.reset() if hasattr(node, "reset") else None
+    model.reset()
+    return model
+
+
+def chain():
+    return fitted(nodes.Reservoir(20, sr=0.9, lr=0.5, seed=0) >> nodes.Ridge(ridge=1e-2))
+
+
+def test_model_same_result_as_run_and_model_untouched():
+    model = chain()
+    run, params, state = pure_run(model)
+
+    final_state, outputs = jax.jit(run)(params, state, X)
+
+    assert set(state["nodes"]) == {"Reservoir", "Ridge"}
+    assert_allclose(model.nodes[0].state["out"], 0.0)
+    assert_allclose(outputs, model.run(X), **TOL)
+    assert_allclose(final_state["nodes"]["Reservoir"]["out"], model.nodes[0].state["out"], **TOL)
+
+
+@pytest.mark.parametrize("feedback, input_to_readout", [(True, False), (False, True), (True, True)])
+def test_esn_with_feedback_and_input_to_readout(feedback, input_to_readout):
+    import reservoirpy.jax as rjx
+
+    model = fitted(rjx.ESN(units=20, sr=0.9, ridge=1e-2, seed=0, feedback=feedback, input_to_readout=input_to_readout))
+    run, params, state = pure_run(model)
+
+    _, outputs = run(params, state, X)
+
+    assert_allclose(outputs, model.run(X), **TOL)
+    assert len(state["feedback"]) == int(feedback)
+
+
+def test_model_continuing_from_final_state_with_feedback():
+    import reservoirpy.jax as rjx
+
+    run, params, state = pure_run(fitted(rjx.ESN(units=20, sr=0.9, ridge=1e-2, seed=0, feedback=True)))
+
+    middle, first = run(params, state, X[:20])
+    _, second = run(params, middle, X[20:])
+
+    assert_allclose(jnp.concatenate([first, second]), run(params, state, X)[1], **TOL)
+
+
+def test_model_parameters_are_named_by_node():
+    model = chain()
+    run, params, state = pure_run(model, "Reservoir.lr", "Ridge.Wout")
+
+    assert set(params) == {"Reservoir.lr", "Ridge.Wout"}
+    _, doubled = run({**params, "Ridge.Wout": 2 * params["Ridge.Wout"]}, state, X)
+    _, plain = run(params, state, X)
+    bias = model.nodes[1].bias
+
+    assert_allclose(doubled - bias, 2 * (plain - bias), atol=1e-4)
+    assert model.nodes[0].lr == 0.5
+
+
+def test_model_vmap_over_starting_states_and_gradient():
+    run, params, state = pure_run(chain(), "Ridge.Wout")
+    starts = jnp.linspace(-0.5, 0.5, 4)[:, None] * jnp.ones(20)
+    many = jax.tree_util.tree_map(lambda leaf: jnp.stack([leaf] * 4), state)
+    many["nodes"]["Reservoir"]["out"] = starts
+
+    _, outputs = jax.vmap(run, in_axes=(None, 0, None))(params, many, X)
+    gradient = jax.grad(lambda p: jnp.sum(run(p, state, X)[1] ** 2))(params)
+
+    assert outputs.shape == (4, 50, 1)
+    assert not np.allclose(outputs[0, 0], outputs[3, 0])
+    assert gradient["Ridge.Wout"].shape == params["Ridge.Wout"].shape
+    assert jnp.all(jnp.isfinite(gradient["Ridge.Wout"]))
+
+
+def test_model_nodes_of_the_same_class_need_names():
+    def deep(**names):
+        first = nodes.Reservoir(20, seed=0, name=names.get("first"))
+        second = nodes.Reservoir(15, seed=1, name=names.get("second"))
+        return fitted(first >> second >> nodes.Ridge(ridge=1e-2))
+
+    with pytest.raises(ValueError, match="name"):
+        pure_run(deep())
+    model = deep(first="fast", second="slow")
+    run, params, state = pure_run(model, "slow.lr")
+
+    assert set(state["nodes"]) == {"fast", "slow", "Ridge"}
+    assert_allclose(run(params, state, X)[1], model.run(X), **TOL)
+
+
+def test_model_with_several_outputs():
+    reservoir = nodes.Reservoir(20, seed=0)
+    model = fitted(reservoir >> [nodes.Ridge(ridge=1e-2, name="a"), nodes.Ridge(ridge=1.0, name="b")])
+    run, params, state = pure_run(model)
+
+    _, outputs = run(params, state, X)
+    expected = model.run(X)
+
+    assert set(outputs) == {"a", "b"}
+    assert_allclose(outputs["a"], expected["a"], **TOL)
+    assert_allclose(outputs["b"], expected["b"], **TOL)
+
+
+def test_model_errors():
+    with pytest.raises(RuntimeError, match="initialize"):
+        pure_run(nodes.Reservoir(20) >> nodes.Ridge())
+    with pytest.raises(AttributeError, match="Reservoir.leak"):
+        pure_run(chain(), "Reservoir.leak")
+    with pytest.raises(ValueError, match="'node.parameter'"):
+        pure_run(chain(), "lr")
+    with pytest.raises(ValueError, match="no node 'Tanh'"):
+        pure_run(chain(), "Tanh.lr")
