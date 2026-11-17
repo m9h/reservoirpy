@@ -9,7 +9,7 @@ import numpy as np
 from ..mat_gen import uniform
 from ..node import Node
 from ..type import NodeInput, State, Timestep, Weights, is_array
-from ..utils.random import rand_generator
+from ..utils.random import noise, rand_generator
 
 
 class LIF(Node):
@@ -55,6 +55,14 @@ class LIF(Node):
         used, then this function should accept any keywords
         parameters and at least two parameters that will be used to define the shape of
         the returned weight matrix.
+    noise_rc : float, default to 0.0
+        Gain of the noise added to the membrane potential of every neuron at
+        each timestep. With enough of it the neurons fire without any input.
+    noise_in : float, default to 0.0
+        Gain of the noise added to the input at each timestep, before the
+        input weights.
+    noise_type : {"normal", "uniform"}, default to "normal"
+        Distribution of the noise: standard normal, or uniform on [-1, 1].
     input_dim : int, optional
         Input dimension. Can be inferred at first call.
     dtype : Numpy dtype, default to np.float64
@@ -156,6 +164,9 @@ class LIF(Node):
         input_connectivity: float = 0.1,
         Win: Union[Weights, Callable] = partial(uniform, low=0.0),
         W: Union[Weights, Callable] = partial(uniform, low=0.0),
+        noise_rc: float = 0.0,
+        noise_in: float = 0.0,
+        noise_type: str = "normal",
         input_dim: Optional[int] = None,
         dtype: type = np.float64,
         seed: Optional[Union[int, np.random.Generator]] = None,
@@ -173,6 +184,15 @@ class LIF(Node):
         self.dtype = dtype
         self.rng = rand_generator(seed=seed)
         self.name = name
+
+        # noise
+        if noise_rc < 0.0 or noise_in < 0.0:
+            raise ValueError(f"Noise gains must be positive, got noise_rc={noise_rc} and noise_in={noise_in}.")
+        if noise_type not in ("normal", "uniform"):
+            raise ValueError(f"'noise_type' must be 'normal' or 'uniform', got '{noise_type}'.")
+        self.noise_rc = noise_rc
+        self.noise_in = noise_in
+        self.noise_type = noise_type
 
         # set units / output_dim
         if units is None and not is_array(W):
@@ -204,11 +224,20 @@ class LIF(Node):
         spikes = np.where(v > threshold, 1.0, 0.0)
         v = np.where(v > threshold, 0.0, v)
         # integrate
+        if self.noise_in > 0.0:
+            x = x + self._noise(self.noise_in, x.shape)
         v += (W @ spikes.T).T
         v += (Win @ x.T).T
+        if self.noise_rc > 0.0:
+            v += self._noise(self.noise_rc, v.shape)
 
         # return spikes
         return {"internal": v, "out": spikes}
+
+    def _noise(self, gain: float, shape: tuple) -> np.ndarray:
+        # numpy's default uniform distribution is not centered
+        kwargs = dict(low=-1.0, high=1.0) if self.noise_type == "uniform" else dict()
+        return noise(self.noise_rng, dist=self.noise_type, shape=shape, gain=gain, **kwargs)
 
     def initialize(
         self,
@@ -218,6 +247,9 @@ class LIF(Node):
         self._set_input_dim(x)
 
         [Win_rng, W_rng, bias_rng] = self.rng.spawn(3)
+        # spawned after the weights generators, so that enabling noise does
+        # not change the weights obtained from a given seed
+        [self.noise_rng] = self.rng.spawn(1)
 
         if callable(self.Win):
             self.Win = self.Win(

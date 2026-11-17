@@ -13,9 +13,10 @@ from ..mat_gen import uniform
 from ..node import Node
 from ..type import NodeInput, State, Timestep, Weights
 from ..utils import rand_generator
+from ._noise import NoisyNodeMixin
 
 
-class LIF(Node):
+class LIF(NoisyNodeMixin, Node):
     """Pool of leaky integrate and fire (LIF) spiking neurons with random recurrent connexions.
 
     This node is similar to a reservoir (large pool of recurrent, randomly connected neurons),
@@ -58,6 +59,14 @@ class LIF(Node):
         used, then this function should accept any keywords
         parameters and at least two parameters that will be used to define the shape of
         the returned weight matrix.
+    noise_rc : float, default to 0.0
+        Gain of the noise added to the membrane potential of every neuron at
+        each timestep. With enough of it the neurons fire without any input.
+    noise_in : float, default to 0.0
+        Gain of the noise added to the input at each timestep, before the
+        input weights.
+    noise_type : {"normal", "uniform"}, default to "normal"
+        Distribution of the noise: standard normal, or uniform on [-1, 1].
     input_dim : int, optional
         Input dimension. Can be inferred at first call.
     dtype : Numpy dtype, default to jnp.float64
@@ -159,6 +168,9 @@ class LIF(Node):
         input_connectivity: float = 0.1,
         Win: Union[Weights, Callable] = partial(uniform, low=0.0),
         W: Union[Weights, Callable] = partial(uniform, low=0.0),
+        noise_rc: float = 0.0,
+        noise_in: float = 0.0,
+        noise_type: str = "normal",
         input_dim: Optional[int] = None,
         dtype: type = jnp.float64,
         seed: Optional[Union[int, Generator]] = None,
@@ -176,6 +188,7 @@ class LIF(Node):
         self.dtype = dtype
         self.rng = rand_generator(seed=seed)
         self.name = name
+        self._set_noise(noise_rc, noise_in, noise_type)
 
         # set units / output_dim
         if units is None and not is_array(W):
@@ -208,11 +221,22 @@ class LIF(Node):
         spikes = jnp.where(v > threshold, 1.0, 0.0)
         v = jnp.where(v > threshold, 0.0, v)
         # integrate
+        # The noise gains are Python floats: a noiseless node is traced
+        # without any random number generation, and its state has no key.
+        if not self._is_noisy:
+            v += (W @ spikes.T).T
+            v += (Win @ x.T).T
+            return {"internal": v, "out": spikes}
+
+        key, key_in, key_rc = jax.random.split(state["noise_key"], 3)
+        if self.noise_in > 0.0:
+            x = x + self._noise(key_in, self.noise_in, x.shape)
         v += (W @ spikes.T).T
         v += (Win @ x.T).T
+        if self.noise_rc > 0.0:
+            v += self._noise(key_rc, self.noise_rc, v.shape)
 
-        # return spikes
-        return {"internal": v, "out": spikes}
+        return {"internal": v, "out": spikes, "noise_key": key}
 
     def initialize(
         self,
@@ -250,5 +274,7 @@ class LIF(Node):
             "internal": jnp.zeros((self.units,)),
             "out": jnp.zeros((self.units,)),
         }
+
+        self._init_noise_key()
 
         self.initialized = True
