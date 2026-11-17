@@ -14,9 +14,10 @@ from ..mat_gen import bernoulli, normal
 from ..node import Node
 from ..type import NodeInput, State, Timestep, Weights, is_array, is_multiseries
 from ..utils import rand_generator
+from ._noise import NoisyNodeMixin
 
 
-class Reservoir(Node):
+class Reservoir(NoisyNodeMixin, Node):
     """Pool of leaky-integrator neurons with random recurrent connexions.
 
     Reservoir neurons states, gathered in a vector :math:`\\mathbf{x}`, follow
@@ -221,14 +222,7 @@ class Reservoir(Node):
         self.rng = rand_generator(seed=seed)
         self.name = name
 
-        # noise
-        if noise_rc < 0.0 or noise_in < 0.0:
-            raise ValueError(f"Noise gains must be positive, got noise_rc={noise_rc} and noise_in={noise_in}.")
-        if noise_type not in ("normal", "uniform"):
-            raise ValueError(f"'noise_type' must be 'normal' or 'uniform', got '{noise_type}'.")
-        self.noise_rc = float(noise_rc)
-        self.noise_in = float(noise_in)
-        self.noise_type = noise_type
+        self._set_noise(noise_rc, noise_in, noise_type)
 
         # set units / output_dim
         if units is None and not is_array(W):
@@ -285,22 +279,11 @@ class Reservoir(Node):
 
         self.state = {"out": jnp.zeros((self.units,))}
 
-        if self._is_noisy:
-            # spawned after the weights generators, so that enabling noise
-            # does not change the weights obtained from a given seed
-            [noise_rng] = self.rng.spawn(1)
-            self.state["noise_key"] = jax.random.PRNGKey(int(noise_rng.integers(2**31 - 1)))
+        # spawned after the weights generators, so that enabling noise does
+        # not change the weights obtained from a given seed
+        self._init_noise_key()
 
         self.initialized = True
-
-    @property
-    def _is_noisy(self) -> bool:
-        return self.noise_rc > 0.0 or self.noise_in > 0.0
-
-    def _noise(self, key, gain: float, shape: tuple):
-        if self.noise_type == "uniform":
-            return gain * jax.random.uniform(key, shape, minval=-1.0, maxval=1.0)
-        return gain * jax.random.normal(key, shape)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step(self, state: State, x: Timestep) -> State:
@@ -330,36 +313,3 @@ class Reservoir(Node):
             next_state = next_state + self._noise(key_rc, self.noise_rc, next_state.shape)
 
         return {"out": next_state, "noise_key": key}
-
-    def run(self, x: Optional[NodeInput] = None, iters: Optional[int] = None, workers=1) -> NodeInput:
-        if not self._is_noisy or x is None or not is_multiseries(x):
-            return super().run(x, iters=iters, workers=workers)
-
-        # Timeseries of a multi-series input all start from the current state.
-        # Each one is given its own noise key; without this, they would all
-        # receive the same noise.
-        check_node_input(x, expected_dim=self.input_dim)
-        if not self.initialized:
-            self.initialize(x)
-
-        keys = jax.random.split(self.state["noise_key"], len(x) + 1)
-        out = self.state["out"]
-        if isinstance(x, Sequence):
-            outputs = [self._run({"out": out, "noise_key": key}, series) for key, series in zip(keys, x)]
-            final_out = outputs[-1][0]["out"]
-            result = [series for _, series in outputs]
-        else:
-            states, result = jax.lax.map(
-                lambda args: self._run({"out": out, "noise_key": args[0]}, args[1]), (keys[:-1], x)
-            )
-            final_out = states["out"][-1]
-
-        self.state = {"out": final_out, "noise_key": keys[-1]}
-        return result
-
-    def reset(self) -> State:
-        previous_state = self.state
-        self.state = {"out": jnp.zeros(self.state["out"].shape)}
-        if "noise_key" in previous_state:
-            self.state["noise_key"] = previous_state["noise_key"]
-        return previous_state
