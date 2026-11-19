@@ -426,19 +426,20 @@ class Model(NumpyModel):
             inputs = []
             if node in x:
                 inputs.append(x[node])
-            inputs += [buffer[-1] for (_p, _d, c), buffer in buffers.items() if c == node]
+            # same order as in _step: input, parents, feedback
             inputs += [new_state[parent]["out"] for parent in self.parents[node]]
-            node_input = np.concatenate(inputs, axis=-1)
+            inputs += [buffer[-1] for (_p, _d, c), buffer in buffers.items() if c == node]
+            node_input = jnp.concatenate(inputs, axis=-1)
             if isinstance(node, NOnlineNode):
                 node_target = y.get(node, None)
                 new_state[node] = {"out": node._learning_step(node_input, node_target)}
             else:
                 new_state[node] = node._step(node_states[node], node_input)
 
-        new_buffers = {edge: buffer.copy() for edge, buffer in buffers.items()}
-        for (p, d, c), buffer in new_buffers.items():
-            buffer[-1] = new_state[p]["out"]
-            new_buffers[(p, d, c)] = np.roll(buffer, 1, axis=0)
+        new_buffers = {}
+        for (p, d, c), buffer in buffers.items():
+            new_buffer = jnp.asarray(buffer).at[-1].set(new_state[p]["out"])
+            new_buffers[(p, d, c)] = jnp.roll(new_buffer, 1, axis=0)
 
         return new_buffers, new_state
 

@@ -529,3 +529,55 @@ def test_fit_optimized_online_readout():
 
     with pytest.raises(NotImplementedError):
         model.fit_optimized(np.ones((3, 10, 2)), np.ones((3, 10, 2)))
+
+
+def test_online_training_gives_inputs_in_the_same_order_as_run():
+    # A reservoir with an input (2 values) and a feedback from the readout
+    # (1 value). With a target of zero the readout stays at zero, so that
+    # training must leave the reservoir in the state a run leaves it in.
+    from reservoirpy.nodes import RLS, Input, Reservoir
+
+    def model():
+        source, reservoir, readout = Input(), Reservoir(20, input_connectivity=1.0, seed=0), RLS()
+        return (source >> reservoir >> readout) & (reservoir << readout), reservoir
+
+    x = np.random.default_rng(0).uniform(-1, 1, (30, 2))
+    trained, trained_reservoir = model()
+    run, run_reservoir = model()
+    trained.partial_fit(x, np.zeros((30, 1)))
+    run.initialize(x, np.zeros((30, 1)))
+    run.run(x)
+
+    assert_allclose(trained_reservoir.state["out"], run_reservoir.state["out"], atol=1e-12)
+
+
+def test_force_learning_generates_the_target_alone():
+    # Sussillo & Abbott (2009): a readout trained online, whose output is fed
+    # back to the reservoir, then runs without any target.
+    from reservoirpy.nodes import RLS, Reservoir
+
+    time = np.arange(3000) * 0.1
+    target = np.sin(time)[:, None]
+    nothing = np.zeros((3000, 0))
+    reservoir, readout = Reservoir(200, sr=1.2, lr=0.3, seed=1), RLS(alpha=1.0)
+    model = (reservoir >> readout) & (reservoir << readout)
+
+    during = model.partial_fit(nothing[:2000], target[:2000])
+    after = model.run(nothing[2000:2300])
+
+    assert np.abs(during[500:] - target[500:2000]).mean() < 0.02
+    assert np.abs(after - target[2000:2300]).mean() < 0.1
+
+
+def test_a_run_with_feedback_continues_from_the_previous_run():
+    def model():
+        reservoir, readout = Reservoir(20, seed=0), Ridge(ridge=1e-3)
+        return (reservoir >> readout) & (reservoir << readout)
+
+    x = np.sin(np.arange(200) / 5.0)[:, None]
+    whole, halves = model().fit(x[:100], x[1:101]), model().fit(x[:100], x[1:101])
+    expected = whole.run(x[100:])
+    first, second = halves.run(x[100:150]), halves.run(x[150:])
+
+    assert_allclose(second, expected[50:], atol=1e-4)
+    assert_allclose(first, expected[:50], atol=1e-4)

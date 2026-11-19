@@ -3,7 +3,7 @@
 
 import jax.numpy as np
 import pytest
-from numpy.testing import assert_array_equal
+from numpy.testing import assert_allclose, assert_array_equal
 
 from ..model import Model
 from ..nodes import RLS, Input, Output, Reservoir, Ridge
@@ -455,3 +455,59 @@ def test_feedback_reservoirs_cycle():
     out = model.run(np.ones((100, 2)))
 
     assert out.shape == (100, 20)
+
+
+def test_online_training_gives_inputs_in_the_same_order_as_run():
+    # A reservoir with an input (2 values) and a feedback from the readout
+    # (1 value). With a target of zero the readout stays at zero, so that
+    # training must leave the reservoir in the state a run leaves it in.
+    import numpy
+
+    from reservoirpy.jax.nodes import RLS, Input, Reservoir
+
+    def model():
+        source, reservoir, readout = Input(), Reservoir(20, input_connectivity=1.0, seed=0), RLS()
+        return (source >> reservoir >> readout) & (reservoir << readout), reservoir
+
+    x = numpy.random.default_rng(0).uniform(-1, 1, (30, 2))
+    trained, trained_reservoir = model()
+    run, run_reservoir = model()
+    trained.partial_fit(x, np.zeros((30, 1)))
+    run.initialize(x, np.zeros((30, 1)))
+    run.run(x)
+
+    numpy.testing.assert_allclose(trained_reservoir.state["out"], run_reservoir.state["out"], atol=1e-5)
+
+
+def test_force_learning_agrees_with_numpy():
+    # online training of a model with a feedback connection
+    import numpy
+
+    import reservoirpy.nodes as numpy_nodes
+    from reservoirpy.jax.nodes import RLS, Reservoir
+
+    time = np.arange(400) * 0.1
+    target, nothing = np.sin(time)[:, None], np.zeros((400, 0))
+    outputs = []
+    for reservoir_class, readout_class in ((Reservoir, RLS), (numpy_nodes.Reservoir, numpy_nodes.RLS)):
+        reservoir, readout = reservoir_class(50, sr=1.2, lr=0.3, seed=1), readout_class(alpha=1.0)
+        model = (reservoir >> readout) & (reservoir << readout)
+        during = model.partial_fit(nothing[:300], target[:300])
+        outputs.append(numpy.concatenate([numpy.asarray(during), numpy.asarray(model.run(nothing[300:]))]))
+
+    assert outputs[0].shape == (400, 1)
+    numpy.testing.assert_allclose(outputs[0], outputs[1], atol=2e-2)
+
+
+def test_a_run_with_feedback_continues_from_the_previous_run():
+    def model():
+        reservoir, readout = Reservoir(20, seed=0), Ridge(ridge=1e-3)
+        return (reservoir >> readout) & (reservoir << readout)
+
+    x = np.sin(np.arange(200) / 5.0)[:, None]
+    whole, halves = model().fit(x[:100], x[1:101]), model().fit(x[:100], x[1:101])
+    expected = whole.run(x[100:])
+    first, second = halves.run(x[100:150]), halves.run(x[150:])
+
+    assert_allclose(second, expected[50:], atol=1e-4)
+    assert_allclose(first, expected[:50], atol=1e-4)
