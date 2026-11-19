@@ -59,6 +59,14 @@ class LIF(NoisyNodeMixin, Node):
         used, then this function should accept any keywords
         parameters and at least two parameters that will be used to define the shape of
         the returned weight matrix.
+    adaptation : float, default to 0.0
+        Spike-frequency adaptation: amount added to the adaptation current of
+        a neuron each time it spikes. This current is subtracted from the
+        membrane potential at each timestep. With noise and strong recurrent
+        excitation, it makes the network fire in bursts instead of saturating.
+    adaptation_lr : float, default to 0.1
+        Leak rate of the adaptation current, in :math:`[0, 1]`: the current
+        loses this fraction of its value at each timestep.
     noise_rc : float, default to 0.0
         Gain of the noise added to the membrane potential of every neuron at
         each timestep. With enough of it the neurons fire without any input.
@@ -149,6 +157,10 @@ class LIF(NoisyNodeMixin, Node):
     input_connectivity: float
     #: Connectivity (or density) of ``Wfb`` (0.1 by default).
     rc_connectivity: float
+    #: Increment of the adaptation current at each spike (0.0 by default).
+    adaptation: float
+    #: Leak rate of the adaptation current (0.1 by default).
+    adaptation_lr: float
     #: Input weights matrix (:math:`\mathbf{W}_{in}`).
     Win: Union["Weights", Callable]
     #: Recurrent weights matrix (:math:`\mathbf{W}`).
@@ -168,6 +180,8 @@ class LIF(NoisyNodeMixin, Node):
         input_connectivity: float = 0.1,
         Win: Union[Weights, Callable] = partial(uniform, low=0.0),
         W: Union[Weights, Callable] = partial(uniform, low=0.0),
+        adaptation: float = 0.0,
+        adaptation_lr: float = 0.1,
         noise_rc: float = 0.0,
         noise_in: float = 0.0,
         noise_type: str = "normal",
@@ -189,6 +203,14 @@ class LIF(NoisyNodeMixin, Node):
         self.rng = rand_generator(seed=seed)
         self.name = name
         self._set_noise(noise_rc, noise_in, noise_type)
+
+        # spike-frequency adaptation
+        if adaptation < 0.0:
+            raise ValueError(f"'adaptation' must be positive, got {adaptation}.")
+        if not 0.0 <= adaptation_lr <= 1.0:
+            raise ValueError(f"'adaptation_lr' must be in [0, 1], got {adaptation_lr}.")
+        self.adaptation = float(adaptation)
+        self.adaptation_lr = float(adaptation_lr)
 
         # set units / output_dim
         if units is None and not is_array(W):
@@ -221,22 +243,27 @@ class LIF(NoisyNodeMixin, Node):
         spikes = jnp.where(v > threshold, 1.0, 0.0)
         v = jnp.where(v > threshold, 0.0, v)
         # integrate
-        # The noise gains are Python floats: a noiseless node is traced
-        # without any random number generation, and its state has no key.
-        if not self._is_noisy:
-            v += (W @ spikes.T).T
-            v += (Win @ x.T).T
-            return {"internal": v, "out": spikes}
-
-        key, key_in, key_rc = jax.random.split(state["noise_key"], 3)
-        if self.noise_in > 0.0:
-            x = x + self._noise(key_in, self.noise_in, x.shape)
+        # The noise gains and the adaptation are Python floats: without them
+        # the node is traced without any random number generation or
+        # adaptation current, and its state has no key for them.
+        next_state = {"out": spikes}
+        if self._is_noisy:
+            key, key_in, key_rc = jax.random.split(state["noise_key"], 3)
+            next_state["noise_key"] = key
+            if self.noise_in > 0.0:
+                x = x + self._noise(key_in, self.noise_in, x.shape)
         v += (W @ spikes.T).T
         v += (Win @ x.T).T
         if self.noise_rc > 0.0:
             v += self._noise(key_rc, self.noise_rc, v.shape)
+        # adapt: each spike adds to a current that holds the neuron back
+        if self.adaptation > 0.0:
+            current = (1 - self.adaptation_lr) * state["adaptation"] + self.adaptation * spikes
+            v = v - current
+            next_state["adaptation"] = current
+        next_state["internal"] = v
 
-        return {"internal": v, "out": spikes, "noise_key": key}
+        return next_state
 
     def initialize(
         self,
@@ -274,6 +301,8 @@ class LIF(NoisyNodeMixin, Node):
             "internal": jnp.zeros((self.units,)),
             "out": jnp.zeros((self.units,)),
         }
+        if self.adaptation > 0.0:
+            self.state["adaptation"] = jnp.zeros((self.units,))
 
         self._init_noise_key()
 
