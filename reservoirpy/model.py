@@ -347,6 +347,7 @@ class Model:
 
                 for node in self.nodes:
                     output_timeseries[node][i] = node_states[node]["out"]
+            new_state = node_states
 
         return (buffers, new_state), output_timeseries
 
@@ -440,8 +441,9 @@ class Model:
             inputs = []
             if node in x:
                 inputs.append(x[node])
-            inputs += [buffer[-1] for (_p, _d, c), buffer in buffers.items() if c == node]
+            # same order as in _step: input, parents, feedback
             inputs += [new_state[parent]["out"] for parent in self.parents[node]]
+            inputs += [buffer[-1] for (_p, _d, c), buffer in buffers.items() if c == node]
             node_input = np.concatenate(inputs, axis=-1)
             if isinstance(node, OnlineNode):
                 node_target = y.get(node, None)
@@ -739,8 +741,7 @@ class Model:
         # Ordered generator: same summation order as the sequential case, whatever the
         # number of workers. With workers=1, joblib runs lazily in the main process.
         results = Parallel(n_jobs=workers, return_as="generator")(
-            delayed(self.worker)(x_seq, y_seq, init_states, init_buffers, warmup)
-            for x_seq, y_seq in sequences()
+            delayed(self.worker)(x_seq, y_seq, init_states, init_buffers, warmup) for x_seq, y_seq in sequences()
         )
         for contribs, final_states, buffers in results:
             for i, contrib in enumerate(contribs):
@@ -759,7 +760,7 @@ class Model:
         self.feedback_buffers = dict(zip(delayed_edges, buffers))
 
         return self
-    
+
     def reset(self) -> tuple[dict[Node, State], FeedbackBuffers]:
         """Reset all Node states and buffers in the Model.
 

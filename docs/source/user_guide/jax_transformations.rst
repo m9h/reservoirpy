@@ -102,11 +102,50 @@ by the name of its class:
 
 Because the readout feeds back into the reservoir, the disturbance changes the states too, not only the output.
 
+Online training
+===============
+
+:py:func:`~reservoirpy.jax.functional.pure_partial_fit` does for ``partial_fit`` what ``pure_run`` does for ``run``.
+What training changes (for :py:class:`~reservoirpy.jax.nodes.RLS`: ``Wout``, ``bias`` and the matrix ``P``) is
+passed in and returned, and the whole training is one compiled loop.
+
+The example is FORCE learning (Sussillo and Abbott, 2009). The output of the readout is fed back to the reservoir
+while the readout is being trained, so that the reservoir is driven by an output that is already nearly right. The
+model then generates the target alone. Here three targets are learned at once from the same reservoir:
+
+.. code-block:: python
+
+    from reservoirpy.jax.functional import pure_partial_fit
+    from reservoirpy.jax.nodes import RLS
+
+    time = jnp.arange(1500) * 0.1
+    targets = jnp.stack([jnp.sin(f * time)[:, None] for f in (1.0, 1.5, 2.0)])
+    nothing = jnp.zeros((1500, 0))                      # the model has no input
+
+    generator, force = Reservoir(200, sr=1.2, lr=0.3, seed=1), RLS(alpha=1.0)
+    model = (generator >> force) & (generator << force)
+    model.initialize(nothing, targets[0])
+
+    fit, learned, state = pure_partial_fit(model)
+    train = jax.jit(jax.vmap(fit, in_axes=(None, None, None, 0)))
+    learned, state, during = train(learned, state, nothing[:1000], targets[:, :1000])
+
+    # each trained model continues alone, from the state training left it in
+    run, _, _ = pure_run(model, "RLS.Wout", "RLS.bias")
+    weights = {"RLS.Wout": learned["RLS.Wout"], "RLS.bias": learned["RLS.bias"]}
+    _, generated = jax.vmap(run, in_axes=(0, 0, None))(weights, state, nothing[1000:])
+    errors = jnp.abs(generated - targets[:, 1000:]).mean(axis=(1, 2))
+
+On a laptop CPU, training a 300-unit model for 3000 steps took 0.13 s this way, 0.34 s with ``partial_fit`` on the
+NumPy backend and 1.0 s with ``partial_fit`` on the Jax backend, which runs a Python loop.
+
 What it does not do
 ===================
 
 - A model must have a single input node, and two nodes of the same class must be given names.
-- Training (``fit``, ``partial_fit``) is not covered. Fit the node first: its learned parameters (``Wout`` and
-  ``bias`` for a readout) can then be exposed like any other.
+- Offline training (``fit``) is not covered. Fit the node first: its learned parameters (``Wout`` and ``bias`` for
+  a readout) can then be exposed like any other.
+- ``pure_partial_fit`` takes :py:class:`~reservoirpy.jax.nodes.RLS` and :py:class:`~reservoirpy.jax.nodes.LMS`
+  readouts, alone or as the only trainable node of a model.
 - A noisy reservoir keeps its random key in the state (``state["noise_key"]``). Two runs from the same state draw the
   same noise; give each run its own key to get independent noise.

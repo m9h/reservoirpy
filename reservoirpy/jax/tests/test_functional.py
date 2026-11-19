@@ -191,7 +191,7 @@ def test_user_guide_examples():
     if not guide.exists():
         pytest.skip("documentation sources are not available")
     blocks = re.findall(r"\.\. code-block:: python\n\n((?:    .*\n|\n)+)", guide.read_text())
-    assert len(blocks) == 5
+    assert len(blocks) == 6
     scope = {}
 
     def run_block(block):
@@ -202,6 +202,9 @@ def test_user_guide_examples():
     scope["reservoir"].reset()
     for block in blocks[1:]:
         run_block(block)
+    # FORCE learning: the three trained models generate their targets alone
+    assert scope["generated"].shape == (3, 500, 1)
+    assert float(scope["errors"].max()) < 0.1
 
     assert float(scope["spread"]) < 1e-5
     spreads = np.asarray(scope["spreads"])
