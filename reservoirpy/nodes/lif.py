@@ -55,6 +55,14 @@ class LIF(Node):
         used, then this function should accept any keywords
         parameters and at least two parameters that will be used to define the shape of
         the returned weight matrix.
+    adaptation : float, default to 0.0
+        Spike-frequency adaptation: amount added to the adaptation current of
+        a neuron each time it spikes. This current is subtracted from the
+        membrane potential at each timestep. With noise and strong recurrent
+        excitation, it makes the network fire in bursts instead of saturating.
+    adaptation_lr : float, default to 0.1
+        Leak rate of the adaptation current, in :math:`[0, 1]`: the current
+        loses this fraction of its value at each timestep.
     noise_rc : float, default to 0.0
         Gain of the noise added to the membrane potential of every neuron at
         each timestep. With enough of it the neurons fire without any input.
@@ -145,6 +153,10 @@ class LIF(Node):
     input_connectivity: float
     #: Connectivity (or density) of ``Wfb`` (0.1 by default).
     rc_connectivity: float
+    #: Increment of the adaptation current at each spike (0.0 by default).
+    adaptation: float
+    #: Leak rate of the adaptation current (0.1 by default).
+    adaptation_lr: float
     #: Input weights matrix (:math:`\mathbf{W}_{in}`).
     Win: Union["Weights", Callable]
     #: Recurrent weights matrix (:math:`\mathbf{W}`).
@@ -164,6 +176,8 @@ class LIF(Node):
         input_connectivity: float = 0.1,
         Win: Union[Weights, Callable] = partial(uniform, low=0.0),
         W: Union[Weights, Callable] = partial(uniform, low=0.0),
+        adaptation: float = 0.0,
+        adaptation_lr: float = 0.1,
         noise_rc: float = 0.0,
         noise_in: float = 0.0,
         noise_type: str = "normal",
@@ -193,6 +207,14 @@ class LIF(Node):
         self.noise_rc = noise_rc
         self.noise_in = noise_in
         self.noise_type = noise_type
+
+        # spike-frequency adaptation
+        if adaptation < 0.0:
+            raise ValueError(f"'adaptation' must be positive, got {adaptation}.")
+        if not 0.0 <= adaptation_lr <= 1.0:
+            raise ValueError(f"'adaptation_lr' must be in [0, 1], got {adaptation_lr}.")
+        self.adaptation = float(adaptation)
+        self.adaptation_lr = float(adaptation_lr)
 
         # set units / output_dim
         if units is None and not is_array(W):
@@ -231,8 +253,14 @@ class LIF(Node):
         if self.noise_rc > 0.0:
             v += self._noise(self.noise_rc, v.shape)
 
-        # return spikes
-        return {"internal": v, "out": spikes}
+        next_state = {"internal": v, "out": spikes}
+        # adapt: each spike adds to a current that holds the neuron back
+        if self.adaptation > 0.0:
+            current = (1 - self.adaptation_lr) * state["adaptation"] + self.adaptation * spikes
+            next_state["internal"] = v - current
+            next_state["adaptation"] = current
+
+        return next_state
 
     def _noise(self, gain: float, shape: tuple) -> np.ndarray:
         # numpy's default uniform distribution is not centered
@@ -277,5 +305,7 @@ class LIF(Node):
             "internal": np.zeros((self.units,)),
             "out": np.zeros((self.units,)),
         }
+        if self.adaptation > 0.0:
+            self.state["adaptation"] = np.zeros((self.units,))
 
         self.initialized = True

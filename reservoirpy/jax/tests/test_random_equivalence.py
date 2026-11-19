@@ -122,6 +122,8 @@ def draw_lif(rng):
         rc_connectivity=float(rng.uniform(0.05, 1.0)),
         seed=int(rng.integers(1000)),
     )
+    if rng.random() < 0.5:
+        params.update(adaptation=float(rng.uniform(0.05, 0.5)), adaptation_lr=float(rng.uniform(0.01, 0.5)))
     return params, dim
 
 
