@@ -145,14 +145,9 @@ def _labels(model: Model) -> dict:
     return labels
 
 
-def _pure_model_run(model: Model, param_names: tuple) -> tuple[Callable, dict, dict]:
-    if not model.initialized:
-        raise RuntimeError("The model is not initialized: fit it or call model.initialize(x) before pure_run.")
-    if len(model.inputs) != 1:
-        raise TypeError(f"pure_run takes a Model with one input node, this one has {len(model.inputs)}.")
-    labels = _labels(model)
+def _targets(labels: dict, param_names: tuple) -> dict:
+    """The node label and attribute behind each name written 'node.parameter'."""
     by_label = {label: node for node, label in labels.items()}
-
     targets = {}
     for name in param_names:
         label, _, attribute = name.rpartition(".")
@@ -163,6 +158,17 @@ def _pure_model_run(model: Model, param_names: tuple) -> tuple[Callable, dict, d
         if not hasattr(by_label[label], attribute):
             raise AttributeError(f"{label} has no parameter '{attribute}' ('{name}').")
         targets[name] = (label, attribute)
+    return targets
+
+
+def _pure_model_run(model: Model, param_names: tuple) -> tuple[Callable, dict, dict]:
+    if not model.initialized:
+        raise RuntimeError("The model is not initialized: fit it or call model.initialize(x) before pure_run.")
+    if len(model.inputs) != 1:
+        raise TypeError(f"pure_run takes a Model with one input node, this one has {len(model.inputs)}.")
+    labels = _labels(model)
+    by_label = {label: node for node, label in labels.items()}
+    targets = _targets(labels, param_names)
 
     names = frozenset(param_names)
     frozen = {label: copy.copy(node) for label, node in by_label.items()}
@@ -210,7 +216,7 @@ def _pure_model_run(model: Model, param_names: tuple) -> tuple[Callable, dict, d
     return run, params, state
 
 
-def pure_partial_fit(node: Node) -> tuple[Callable, dict, State]:
+def pure_partial_fit(node: Node, *param_names: str) -> tuple[Callable, dict, State]:
     """The online training of an initialized node or model, as a pure function.
 
     :py:meth:`~reservoirpy.jax.node.OnlineNode.partial_fit` runs a Python
@@ -224,6 +230,12 @@ def pure_partial_fit(node: Node) -> tuple[Callable, dict, State]:
         An initialized online node, or an initialized model with one input
         node and one online node, with or without feedback connections.
         It is never modified, neither here nor by the returned function.
+    *param_names : str
+        For a model, names of parameters that training does not change and
+        that become a fifth argument of the returned function,
+        ``fit(learned, state, x, y, params)``. They are written as in
+        :py:func:`pure_run`, which gives their current values:
+        ``pure_run(model, "Reservoir.W")[1]``.
 
     Returns
     -------
@@ -271,7 +283,9 @@ def pure_partial_fit(node: Node) -> tuple[Callable, dict, State]:
            https://doi.org/10.1016/j.neuron.2009.07.018
     """
     if isinstance(node, Model):
-        return _pure_model_partial_fit(node)
+        return _pure_model_partial_fit(node, param_names)
+    if param_names:
+        raise TypeError("Other parameters can only be passed for a Model: an online node has none that matter.")
     _check_online(node)
     if not node.initialized:
         raise RuntimeError(f"{type(node).__name__} is not initialized: call node.initialize(x, y) first.")
@@ -310,7 +324,7 @@ def _learn(frozen: OnlineNode, learned: dict, x, y) -> tuple[dict, jax.Array]:
     return {name: jnp.asarray(getattr(local, name), dtype=float) for name in learned}, prediction
 
 
-def _pure_model_partial_fit(model: Model) -> tuple[Callable, dict, dict]:
+def _pure_model_partial_fit(model: Model, param_names: tuple = ()) -> tuple[Callable, dict, dict]:
     if not model.initialized:
         raise RuntimeError("The model is not initialized: call model.initialize(x, y) before pure_partial_fit.")
     if len(model.inputs) != 1:
@@ -325,6 +339,8 @@ def _pure_model_partial_fit(model: Model) -> tuple[Callable, dict, dict]:
     _check_online(trained)
 
     labels = _labels(model)
+    targets = _targets(labels, param_names)
+    names = frozenset(param_names)
     frozen = {label: copy.copy(node) for node, label in labels.items()}
     order = [labels[node] for node in model.execution_order]
     parents = {labels[node]: [labels[parent] for parent in model.parents[node]] for node in model.nodes}
@@ -338,7 +354,15 @@ def _pure_model_partial_fit(model: Model) -> tuple[Callable, dict, dict]:
         "feedback": [jnp.asarray(buffer) for buffer in model.feedback_buffers.values()],
     }
 
-    def fit(learned: dict, state: dict, x: Timeseries, y: Timeseries):
+    def fit(learned: dict, state: dict, x: Timeseries, y: Timeseries, params: dict = {}):
+        if set(params) != names:
+            missing, unknown = sorted(names - set(params)), sorted(set(params) - names)
+            raise KeyError(f"params must have the keys {sorted(names)}: missing {missing}, unexpected {unknown}.")
+        local = {label: copy.copy(node) for label, node in frozen.items()}
+        for name, value in params.items():
+            label, attribute = targets[name]
+            setattr(local[label], attribute, value)
+
         def step(carry, xy):
             (buffers, node_states, values), (x_t, y_t) = carry, xy
             new_states = {}
@@ -349,10 +373,10 @@ def _pure_model_partial_fit(model: Model) -> tuple[Callable, dict, dict]:
                 inputs += [buffer[-1] for (_parent, child), buffer in zip(edges, buffers) if child == label]
                 node_input = jnp.concatenate(inputs, axis=-1)
                 if label == trained_label:
-                    values, prediction = _learn(frozen[label], values, node_input, y_t)
+                    values, prediction = _learn(local[label], values, node_input, y_t)
                     new_states[label] = {"out": prediction}
                 else:
-                    new_states[label] = frozen[label]._step(node_states[label], node_input)
+                    new_states[label] = local[label]._step(node_states[label], node_input)
             new_buffers = [
                 jnp.roll(buffer.at[-1].set(new_states[parent]["out"]), 1, axis=0)
                 for (parent, _child), buffer in zip(edges, buffers)

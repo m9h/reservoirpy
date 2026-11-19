@@ -137,3 +137,28 @@ def test_errors():
     two.initialize(X, {"first": Y, "second": Y})
     with pytest.raises(TypeError, match="one"):
         pure_partial_fit(two)
+
+
+def test_other_parameters_can_be_passed_to_the_training():
+    # as in pure_run; here the recurrent weights, to train several networks at once
+    model, _ = force()
+    fit, learned, state = pure_partial_fit(model, "Reservoir.W")
+    _, params, _ = pure_run(model, "Reservoir.W")
+    plain_fit, _, _ = pure_partial_fit(model)
+
+    _, _, same = fit(learned, state, NOTHING[:100], TARGET[:100], params)
+    _, _, expected = plain_fit(learned, state, NOTHING[:100], TARGET[:100])
+    assert_allclose(same, expected, atol=1e-5)
+
+    scales = jnp.array([1.0, 0.5])
+    scaled = jax.vmap(
+        lambda scale: fit(learned, state, NOTHING[:100], TARGET[:100], {"Reservoir.W": params["Reservoir.W"] * scale})
+    )
+    weights, _, outputs = scaled(scales)
+    assert_allclose(outputs[0], expected, atol=1e-5)
+    assert float(jnp.abs(weights["RLS.Wout"][0] - weights["RLS.Wout"][1]).max()) > 1e-3
+
+    with pytest.raises(KeyError):
+        fit(learned, state, NOTHING[:100], TARGET[:100], {})
+    with pytest.raises(AttributeError):
+        pure_partial_fit(model, "Reservoir.nothing")
