@@ -76,6 +76,9 @@ class LMS(OnlineNode):
     #: If True, learn a bias term (True by default).
     fit_bias: bool
 
+    # what _learning_step changes, for reservoirpy.jax.functional.pure_partial_fit
+    _learned = ("Wout", "bias")
+
     def __init__(
         self,
         learning_rate: float = 1e-6,

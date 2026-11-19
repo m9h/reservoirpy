@@ -14,6 +14,7 @@ need a function whose result depends only on its arguments.
    :toctree: generated/
 
     pure_run
+    pure_partial_fit
 
 Example
 =======
@@ -47,10 +48,10 @@ import jax.numpy as jnp
 from jax.experimental import sparse
 
 from .model import Model
-from .node import Node
+from .node import Node, OnlineNode
 from .type import State, Timeseries
 
-__all__ = ["pure_run"]
+__all__ = ["pure_run", "pure_partial_fit"]
 
 
 def pure_run(node: Node, *param_names: str) -> tuple[Callable, dict, State]:
@@ -207,6 +208,166 @@ def _pure_model_run(model: Model, param_names: tuple) -> tuple[Callable, dict, d
         return {"nodes": node_states, "feedback": buffers}, outputs
 
     return run, params, state
+
+
+def pure_partial_fit(node: Node) -> tuple[Callable, dict, State]:
+    """The online training of an initialized node or model, as a pure function.
+
+    :py:meth:`~reservoirpy.jax.node.OnlineNode.partial_fit` runs a Python
+    loop and stores what it learns in the node. The function returned here
+    does the same computation in one ``jax.lax.scan``: it can be compiled,
+    and applied to many targets, starting states or networks at once.
+
+    Parameters
+    ----------
+    node : :py:class:`~reservoirpy.jax.nodes.RLS`, :py:class:`~reservoirpy.jax.nodes.LMS` or :py:class:`~reservoirpy.jax.Model`
+        An initialized online node, or an initialized model with one input
+        node and one online node, with or without feedback connections.
+        It is never modified, neither here nor by the returned function.
+
+    Returns
+    -------
+    fit : callable
+        ``fit(learned, state, x, y) -> (learned, state, outputs)``, where
+        ``x`` has shape ``(timesteps, input_dim)``, ``y`` is the target of
+        the online node, of shape ``(timesteps, output_dim)``, and
+        ``outputs`` is what the node or model produced while it was learning.
+        A model without input takes an ``x`` of shape ``(timesteps, 0)``.
+    learned : dict
+        What training changes, with its current value: for
+        :py:class:`~reservoirpy.jax.nodes.RLS`, ``Wout``, ``bias``, ``P`` and
+        ``S``. For a model the names are written ``"node.parameter"``, as
+        in :py:func:`pure_run`.
+    state : dict
+        Current state of the node or model, as in :py:func:`pure_run`.
+
+    Raises
+    ------
+    RuntimeError
+        If the node or model is not initialized.
+    TypeError
+        If the node is not an online node, or if the model does not have
+        exactly one online node, or has another trainable node.
+
+    Example
+    -------
+    FORCE learning [1]_: the output of the readout is fed back to the
+    reservoir while the readout is trained, then the model generates the
+    target alone.
+
+    >>> reservoir, readout = Reservoir(300, sr=1.2, lr=0.3), RLS(alpha=1.0)
+    >>> model = (reservoir >> readout) & (reservoir << readout)
+    >>> model.initialize(x, target)  # x of shape (timesteps, 0)
+    >>> fit, learned, state = pure_partial_fit(model)
+    >>> learned, state, during = jax.jit(fit)(learned, state, x, target)
+    >>> run, _, _ = pure_run(model, "RLS.Wout", "RLS.bias")
+    >>> weights = {"RLS.Wout": learned["RLS.Wout"], "RLS.bias": learned["RLS.bias"]}
+    >>> state, after = run(weights, state, x)
+
+    References
+    ----------
+    .. [1] Sussillo, D., & Abbott, L. F. (2009). Generating Coherent Patterns of
+           Activity from Chaotic Neural Networks. Neuron, 63(4), 544–557.
+           https://doi.org/10.1016/j.neuron.2009.07.018
+    """
+    if isinstance(node, Model):
+        return _pure_model_partial_fit(node)
+    _check_online(node)
+    if not node.initialized:
+        raise RuntimeError(f"{type(node).__name__} is not initialized: call node.initialize(x, y) first.")
+
+    frozen = copy.copy(node)
+    learned = {name: jnp.asarray(getattr(node, name), dtype=float) for name in node._learned}
+    state = dict(node.state)
+
+    def fit(learned: dict, state: State, x: Timeseries, y: Timeseries):
+        def step(learned, xy):
+            learned, prediction = _learn(frozen, learned, *xy)
+            return learned, prediction
+
+        learned, outputs = jax.lax.scan(step, learned, (jnp.asarray(x), jnp.asarray(y)))
+        return learned, {**state, "out": outputs[-1]}, outputs
+
+    return fit, learned, state
+
+
+def _check_online(node: Node):
+    if not isinstance(node, OnlineNode):
+        raise TypeError(f"{type(node).__name__} is not an online node: it has no partial_fit to make pure.")
+    if not hasattr(node, "_learned"):
+        raise TypeError(
+            f"{type(node).__name__} does not say what its online training changes: give the class an attribute "
+            "'_learned', the names of the attributes that '_learning_step' updates."
+        )
+
+
+def _learn(frozen: OnlineNode, learned: dict, x, y) -> tuple[dict, jax.Array]:
+    """One learning step of a copy of the node that holds the values of ``learned``."""
+    local = copy.copy(frozen)
+    for name, value in learned.items():
+        setattr(local, name, value)
+    prediction = local._learning_step(x, y)
+    return {name: jnp.asarray(getattr(local, name), dtype=float) for name in learned}, prediction
+
+
+def _pure_model_partial_fit(model: Model) -> tuple[Callable, dict, dict]:
+    if not model.initialized:
+        raise RuntimeError("The model is not initialized: call model.initialize(x, y) before pure_partial_fit.")
+    if len(model.inputs) != 1:
+        raise TypeError(f"pure_partial_fit takes a Model with one input node, this one has {len(model.inputs)}.")
+    online = [node for node in model.trainable_nodes if isinstance(node, OnlineNode)]
+    if len(online) != 1 or len(model.trainable_nodes) != 1:
+        raise TypeError(
+            "pure_partial_fit takes a Model with one online node and no other trainable node, this one has "
+            f"{len(online)} online node(s) among {len(model.trainable_nodes)} trainable node(s)."
+        )
+    [trained] = online
+    _check_online(trained)
+
+    labels = _labels(model)
+    frozen = {label: copy.copy(node) for node, label in labels.items()}
+    order = [labels[node] for node in model.execution_order]
+    parents = {labels[node]: [labels[parent] for parent in model.parents[node]] for node in model.nodes}
+    edges = [(labels[parent], labels[child]) for (parent, _delay, child) in model.feedback_buffers]
+    input_label, trained_label = labels[model.inputs[0]], labels[trained]
+    output_labels = [labels[node] for node in model.outputs]
+
+    learned = {f"{trained_label}.{name}": jnp.asarray(getattr(trained, name), dtype=float) for name in trained._learned}
+    state = {
+        "nodes": {label: dict(node.state) for node, label in labels.items()},
+        "feedback": [jnp.asarray(buffer) for buffer in model.feedback_buffers.values()],
+    }
+
+    def fit(learned: dict, state: dict, x: Timeseries, y: Timeseries):
+        def step(carry, xy):
+            (buffers, node_states, values), (x_t, y_t) = carry, xy
+            new_states = {}
+            # same order of concatenation as Model._step: input, parents, feedback
+            for label in order:
+                inputs = [x_t] if label == input_label else []
+                inputs += [new_states[parent]["out"] for parent in parents[label]]
+                inputs += [buffer[-1] for (_parent, child), buffer in zip(edges, buffers) if child == label]
+                node_input = jnp.concatenate(inputs, axis=-1)
+                if label == trained_label:
+                    values, prediction = _learn(frozen[label], values, node_input, y_t)
+                    new_states[label] = {"out": prediction}
+                else:
+                    new_states[label] = frozen[label]._step(node_states[label], node_input)
+            new_buffers = [
+                jnp.roll(buffer.at[-1].set(new_states[parent]["out"]), 1, axis=0)
+                for (parent, _child), buffer in zip(edges, buffers)
+            ]
+            return (new_buffers, new_states, values), {label: new_states[label]["out"] for label in output_labels}
+
+        values = {name.rpartition(".")[2]: value for name, value in learned.items()}
+        start = (state["feedback"], state["nodes"], values)
+        (buffers, node_states, values), outputs = jax.lax.scan(step, start, (jnp.asarray(x), jnp.asarray(y)))
+        if len(output_labels) == 1:
+            outputs = outputs[output_labels[0]]
+        learned = {f"{trained_label}.{name}": value for name, value in values.items()}
+        return learned, {"nodes": node_states, "feedback": buffers}, outputs
+
+    return fit, learned, state
 
 
 def _as_array(value):

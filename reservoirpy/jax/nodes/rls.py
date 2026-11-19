@@ -86,6 +86,9 @@ class RLS(OnlineNode):
     #: Forgetting factor (:math:`\\lambda`) (:math:`1` by default).
     forgetting: float
 
+    # what _learning_step changes, for reservoirpy.jax.functional.pure_partial_fit
+    _learned = ("Wout", "bias", "P", "S")
+
     def __init__(
         self,
         alpha: float = 1e-6,
